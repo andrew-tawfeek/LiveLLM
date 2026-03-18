@@ -1,5 +1,5 @@
-vosk
 sounddevice
-ollama
-pyttsx3
 numpy
+ollama
+faster-whisper
+pywin32

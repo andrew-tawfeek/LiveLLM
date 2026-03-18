@@ -1,32 +1,33 @@
 """
 LiveLLM - Local Voice Assistant Pipeline
-Microphone -> Vosk STT -> Ollama LLM -> pyttsx3 TTS -> Speaker
+Microphone -> faster-whisper STT -> Ollama LLM -> Windows SAPI TTS -> Speaker
 
 Usage: python main.py
 Requirements: Ollama running with qwen2.5:7b pulled
 """
 
-import vosk
 import sounddevice as sd
-import json
-import queue
+import numpy as np
 import threading
-import subprocess
-import sys
+import queue
 import time
-import os
-import tempfile
+import sys
 
 import ollama
-import numpy as np
+from faster_whisper import WhisperModel
 
 
 # --- Configuration ---
 OLLAMA_MODEL = "qwen2.5:7b"
 SAMPLE_RATE = 16000
-BLOCK_SIZE = 4000
-VOSK_MODEL = "vosk-model-en-us-0.22"  # Larger model for much better accuracy
-TTS_RATE = 175
+BLOCK_DURATION = 0.1  # seconds per audio block
+BLOCK_SIZE = int(SAMPLE_RATE * BLOCK_DURATION)
+WHISPER_MODEL = "base"  # Options: tiny, base, small, medium
+SILENCE_DURATION = 1.5  # seconds of silence = end of utterance
+MIN_SPEECH_DURATION = 0.5  # minimum speech length to process
+DEBUG_LEVELS = True  # show live audio RMS levels
+TTS_RATE = 2  # SAPI rate: -10 (slowest) to 10 (fastest)
+INPUT_DEVICE = None  # Set to a device index to override (see list_devices.py)
 SYSTEM_PROMPT = (
     "You are a helpful voice assistant. Keep responses concise and "
     "conversational - aim for 1-3 sentences unless the user asks for detail."
@@ -40,34 +41,27 @@ conversation_history = []
 
 
 def tts_worker():
-    """Background thread: pulls sentences from tts_queue and speaks them via pyttsx3.
+    """Speak sentences using Windows SAPI directly via COM.
 
-    pyttsx3 is initialized inside this thread to avoid COM threading issues on Windows.
-    Each sentence is spoken synchronously so we can track when speech finishes.
+    Uses win32com.client with explicit COM initialization on this thread,
+    which avoids the threading bugs that plague pyttsx3.
     """
-    import pyttsx3
+    import pythoncom
+    import win32com.client
 
+    pythoncom.CoInitialize()
     try:
-        engine = pyttsx3.init()
-        engine.setProperty("rate", TTS_RATE)
-
-        voices = engine.getProperty("voices")
-        for v in voices:
-            if "zira" in v.name.lower() or "david" in v.name.lower():
-                engine.setProperty("voice", v.id)
-                break
-
-        # Quick test to confirm TTS works
-        engine.say(" ")
-        engine.runAndWait()
-        print("[TTS engine initialized]", file=sys.stderr)
+        speaker = win32com.client.Dispatch("SAPI.SpVoice")
+        speaker.Rate = TTS_RATE
+        # Speak a space to confirm TTS works
+        speaker.Speak(" ")
+        print("[TTS ready]", file=sys.stderr)
     except Exception as e:
-        print(f"\n[TTS init failed: {e}]", file=sys.stderr)
-        print("[Falling back to no TTS - text only]", file=sys.stderr)
-        # Drain queue without speaking
+        print(f"[TTS init failed: {e}]", file=sys.stderr)
+        pythoncom.CoUninitialize()
+        # Drain the queue so the program doesn't hang
         while True:
-            text = tts_queue.get()
-            if text is None:
+            if tts_queue.get() is None:
                 break
         return
 
@@ -77,20 +71,14 @@ def tts_worker():
             break
         is_speaking.set()
         try:
-            engine.say(text)
-            engine.runAndWait()
+            speaker.Speak(text)
         except Exception as e:
-            print(f"\n[TTS error: {e}]", file=sys.stderr)
-            # Reinitialize engine on failure
-            try:
-                engine = pyttsx3.init()
-                engine.setProperty("rate", TTS_RATE)
-            except Exception:
-                pass
-        # Brief pause to check if more queued speech follows
+            print(f"[TTS error: {e}]", file=sys.stderr)
         time.sleep(0.05)
         if tts_queue.empty():
             is_speaking.clear()
+
+    pythoncom.CoUninitialize()
 
 
 def flush_sentences(buffer):
@@ -119,8 +107,8 @@ def flush_sentences(buffer):
 
 
 def process_with_llm(text):
-    """Send transcribed text to Ollama, stream response, and queue TTS."""
-    clear_line()
+    """Send transcribed text to Ollama, stream response, queue TTS."""
+    sys.stdout.write("\r" + " " * 80 + "\r")
     print(f"\n You: {text}")
     print(" Assistant: ", end="", flush=True)
 
@@ -155,19 +143,62 @@ def process_with_llm(text):
         print("Make sure Ollama is running (ollama serve).")
 
 
-def clear_line():
-    sys.stdout.write("\r" + " " * 80 + "\r")
-    sys.stdout.flush()
-
-
 def audio_callback(indata, frames, time_info, status):
     if status:
         print(f"[audio: {status}]", file=sys.stderr)
-    audio_queue.put(bytes(indata))
+    audio_queue.put(np.frombuffer(indata, dtype=np.int16).copy())
+
+
+def pick_input_device():
+    """Let the user pick a mic if INPUT_DEVICE is not set."""
+    if INPUT_DEVICE is not None:
+        info = sd.query_devices(INPUT_DEVICE)
+        print(f"  Using configured device {INPUT_DEVICE}: {info['name']}")
+        return INPUT_DEVICE
+
+    # List input devices
+    devices = sd.query_devices()
+    input_devs = []
+    for i, d in enumerate(devices):
+        if d["max_input_channels"] > 0 and "Windows DirectSound" not in d["name"] \
+                and "WDM-KS" not in d["name"] and "Sound Mapper" not in d["name"]:
+            input_devs.append((i, d))
+
+    print("  Available microphones:")
+    for idx, (i, d) in enumerate(input_devs):
+        default_mark = " (default)" if i == sd.default.device[0] else ""
+        print(f"    [{idx}] {d['name']}{default_mark}")
+
+    while True:
+        try:
+            choice = input(f"  Pick a mic [0-{len(input_devs)-1}]: ").strip()
+            choice_idx = int(choice)
+            if 0 <= choice_idx < len(input_devs):
+                dev_id = input_devs[choice_idx][0]
+                print(f"  Selected: {input_devs[choice_idx][1]['name']}")
+                return dev_id
+        except (ValueError, EOFError):
+            pass
+        print("  Invalid choice, try again.")
+
+
+def calibrate_mic(device):
+    """Record 2 seconds of ambient noise to auto-set thresholds."""
+    print("  Stay quiet for 2 seconds to calibrate mic...", flush=True)
+    recording = sd.rec(
+        int(2 * SAMPLE_RATE), samplerate=SAMPLE_RATE, channels=1, dtype="int16",
+        device=device,
+    )
+    sd.wait()
+    noise_rms = np.sqrt(np.mean(recording.astype(np.float64) ** 2))
+    start_threshold = max(noise_rms * 1.5, 200)
+    continue_threshold = max(noise_rms * 1.2, 150)
+    print(f"  Noise floor: {noise_rms:.0f}")
+    print(f"  Start threshold: {start_threshold:.0f} | Continue threshold: {continue_threshold:.0f}")
+    return start_threshold, continue_threshold
 
 
 def check_ollama():
-    """Verify Ollama is reachable."""
     try:
         ollama.list()
         return True
@@ -181,62 +212,135 @@ def main():
     print("=" * 50)
 
     # Pre-flight checks
-    print("\n[1/3] Checking Ollama...", end=" ", flush=True)
+    print("\n[1/4] Checking Ollama...", end=" ", flush=True)
     if not check_ollama():
-        print("FAILED")
-        print("  Could not connect to Ollama. Run 'ollama serve' first.")
+        print("FAILED - run 'ollama serve' first.")
         sys.exit(1)
     print("OK")
 
-    print("[2/3] Loading speech recognition model...", end=" ", flush=True)
-    vosk.SetLogLevel(-1)
-    model = vosk.Model(model_name=VOSK_MODEL)
-    recognizer = vosk.KaldiRecognizer(model, SAMPLE_RATE)
-    recognizer.SetWords(True)
+    print("[2/4] Loading Whisper STT model...", end=" ", flush=True)
+    whisper_model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
     print("OK")
 
-    print("[3/3] Starting TTS engine...", end=" ", flush=True)
+    print("[3/4] Starting TTS engine...", end=" ", flush=True)
     tts_thread = threading.Thread(target=tts_worker, daemon=True)
     tts_thread.start()
     print("OK")
 
+    print("[4/4] Selecting microphone...")
+    device_id = pick_input_device()
+
+    print("  Calibrating...")
+    start_threshold, continue_threshold = calibrate_mic(device_id)
+
     print("\n Ready! Speak into your microphone.")
-    print(" Tip: Use headphones to avoid audio feedback.")
+    if DEBUG_LEVELS:
+        print(" (debug: showing live RMS levels)")
     print(" Press Ctrl+C to exit.\n")
 
+    # VAD state
+    audio_buffer = []
+    is_speech = False
+    silence_blocks = 0
+    speech_blocks = 0
+    blocks_for_silence = int(SILENCE_DURATION / BLOCK_DURATION)
+    min_speech_blocks = int(MIN_SPEECH_DURATION / BLOCK_DURATION)
+    level_counter = 0
+
     try:
-        with sd.RawInputStream(
+        with sd.InputStream(
             samplerate=SAMPLE_RATE,
             blocksize=BLOCK_SIZE,
             dtype="int16",
             channels=1,
+            device=device_id,
             callback=audio_callback,
         ):
             while True:
-                data = audio_queue.get()
-
-                # Ignore mic input while the assistant is speaking
-                if is_speaking.is_set():
+                try:
+                    data = audio_queue.get(timeout=0.5)
+                except queue.Empty:
                     continue
 
-                if recognizer.AcceptWaveform(data):
-                    result = json.loads(recognizer.Result())
-                    text = result.get("text", "").strip()
-                    if text and len(text) > 1:
-                        process_with_llm(text)
-                else:
-                    partial = json.loads(recognizer.PartialResult())
-                    partial_text = partial.get("partial", "")
-                    if partial_text:
-                        sys.stdout.write(f"\r  hearing: {partial_text:<70}")
+                # Skip mic input while assistant is speaking
+                if is_speaking.is_set():
+                    audio_buffer = []
+                    is_speech = False
+                    silence_blocks = 0
+                    speech_blocks = 0
+                    continue
+
+                rms = np.sqrt(np.mean(data.astype(np.float64) ** 2))
+
+                # Show live levels every ~0.5s when idle
+                if DEBUG_LEVELS and not is_speech:
+                    level_counter += 1
+                    if level_counter % 5 == 0:
+                        bar_len = min(int(rms / 100), 50)
+                        marker = ">>>" if rms > start_threshold else "   "
+                        sys.stdout.write(
+                            f"\r  rms: {rms:>6.0f} |{'#' * bar_len:<50}| "
+                            f"thresh: {start_threshold:.0f} {marker}"
+                        )
                         sys.stdout.flush()
+
+                # Use start_threshold to begin, continue_threshold to keep going
+                active_threshold = continue_threshold if is_speech else start_threshold
+
+                if rms > active_threshold:
+                    # Speech detected (or continuing)
+                    if not is_speech:
+                        is_speech = True
+                    silence_blocks = 0
+                    speech_blocks += 1
+                    audio_buffer.append(data)
+                    sys.stdout.write(
+                        f"\r  [listening... {speech_blocks * BLOCK_DURATION:.1f}s]"
+                        + " " * 50
+                    )
+                    sys.stdout.flush()
+                elif is_speech:
+                    # Silence during speech — keep buffering (captures pauses)
+                    silence_blocks += 1
+                    audio_buffer.append(data)
+
+                    if silence_blocks >= blocks_for_silence:
+                        if speech_blocks >= min_speech_blocks:
+                            # End of utterance - transcribe
+                            full_audio = np.concatenate(audio_buffer)
+                            audio_buffer = []
+                            is_speech = False
+                            silence_blocks = 0
+                            speech_blocks = 0
+
+                            sys.stdout.write("\r  [transcribing...]" + " " * 50)
+                            sys.stdout.flush()
+
+                            audio_float = full_audio.astype(np.float32) / 32768.0
+                            segments, _info = whisper_model.transcribe(
+                                audio_float, beam_size=5, language="en"
+                            )
+                            text = " ".join(
+                                s.text for s in segments if s.no_speech_prob < 0.6
+                            ).strip()
+
+                            if text and len(text) > 1:
+                                process_with_llm(text)
+                            else:
+                                sys.stdout.write("\r" + " " * 80 + "\r")
+                                sys.stdout.flush()
+                        else:
+                            # Too short, discard
+                            audio_buffer = []
+                            is_speech = False
+                            silence_blocks = 0
+                            speech_blocks = 0
 
     except KeyboardInterrupt:
         print("\n\nGoodbye!")
         tts_queue.put(None)
     except Exception as e:
         print(f"\nError: {e}")
-        print("Make sure your microphone is connected and accessible.")
         sys.exit(1)
 
 
