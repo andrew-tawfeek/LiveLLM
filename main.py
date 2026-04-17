@@ -12,6 +12,11 @@ import threading
 import queue
 import time
 import sys
+import faulthandler
+import traceback
+
+# Print a C-level stack trace to stderr if a native crash (portaudio, etc.) occurs.
+faulthandler.enable()
 
 import ollama
 from faster_whisper import WhisperModel
@@ -260,9 +265,12 @@ def handle_interrupt():
 
 
 def audio_callback(indata, frames, time_info, status):
-    if status:
-        print(f"[audio: {status}]", file=sys.stderr)
-    audio_queue.put(np.frombuffer(indata, dtype=np.int16).copy())
+    try:
+        if status:
+            print(f"[audio: {status}]", file=sys.stderr, flush=True)
+        audio_queue.put(np.frombuffer(indata, dtype=np.int16).copy())
+    except Exception as e:
+        print(f"[audio callback error: {e}]", file=sys.stderr, flush=True)
 
 
 def pick_input_device():
@@ -528,8 +536,14 @@ def main():
         print("\n\nGoodbye!")
         tts_queue.put(None)
     except Exception as e:
-        print(f"\nError: {e}")
+        print(f"\nError: {e}", flush=True)
+        traceback.print_exc()
         sys.exit(1)
+    except BaseException as e:
+        # Catches SystemExit, GeneratorExit, etc. that Exception would miss.
+        print(f"\nBaseException {type(e).__name__}: {e}", flush=True)
+        traceback.print_exc()
+        raise
 
 
 if __name__ == "__main__":
