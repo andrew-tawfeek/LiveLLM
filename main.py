@@ -28,6 +28,9 @@ WHISPER_MODEL = "base"  # Options: tiny, base, small, medium
 SILENCE_DURATION = 1.5  # seconds of silence = end of utterance
 MIN_SPEECH_DURATION = 0.5  # minimum speech length to process
 DEBUG_LEVELS = True  # show live audio RMS levels
+# --- Interrupt (barge-in) Config ---
+MIN_INTERRUPT_SPEECH_DURATION = 1.0  # sustained speech to cut off the assistant (seconds)
+INTERRUPT_THRESHOLD_MULT = 2.0       # interrupt requires rms > start_threshold * this factor
 # --- Piper Voice Config ---
 # Any path in models/piper/ will also appear in the launch-time voice picker.
 PIPER_VOICE_PATH = "models/piper/en_US-amy-medium.onnx"
@@ -50,8 +53,18 @@ SYSTEM_PROMPT = (
 # --- Shared State ---
 audio_queue = queue.Queue()
 tts_queue = queue.Queue()
-is_speaking = threading.Event()
+is_speaking = threading.Event()          # assistant is generating and/or speaking
+interrupt_event = threading.Event()      # user barged in; abort LLM + TTS
 conversation_history = []
+
+# Progress tracking so an interrupt can record what was actually spoken.
+tts_progress_lock = threading.Lock()
+tts_spoken = []                # fully-played sentences since the last user turn
+tts_current = {"text": None, "started": None, "duration": None}
+llm_partial_lock = threading.Lock()
+llm_partial = {"content": ""}  # streaming LLM output so far
+
+llm_thread_ref = {"t": None}   # handle to the in-flight LLM worker thread
 
 
 def synthesize_piper(voice, text):
@@ -92,12 +105,25 @@ def tts_worker():
         text = tts_queue.get()
         if text is None:
             break
+        # Drop any sentences queued during an active interrupt.
+        if interrupt_event.is_set():
+            continue
         is_speaking.set()
         try:
             samples, sample_rate = synthesize_piper(voice, text)
-            if samples.size:
+            if samples.size and not interrupt_event.is_set():
+                with tts_progress_lock:
+                    tts_current["text"] = text
+                    tts_current["started"] = time.monotonic()
+                    tts_current["duration"] = len(samples) / sample_rate
                 sd.play(samples, sample_rate)
-                sd.wait()
+                sd.wait()  # returns early when handle_interrupt() calls sd.stop()
+                with tts_progress_lock:
+                    if not interrupt_event.is_set():
+                        tts_spoken.append(text)
+                    tts_current["text"] = None
+                    tts_current["started"] = None
+                    tts_current["duration"] = None
         except Exception as e:
             print(f"[TTS error: {e}]", file=sys.stderr)
         time.sleep(0.05)
@@ -130,41 +156,107 @@ def flush_sentences(buffer):
     return sentences, buffer
 
 
-def process_with_llm(text):
-    """Send transcribed text to Ollama, stream response, queue TTS."""
-    sys.stdout.write("\r" + " " * 80 + "\r")
-    print(f"\n You: {text}")
-    print(" Assistant: ", end="", flush=True)
+def llm_worker(text):
+    """Stream LLM tokens in a thread so the main loop can still listen for interrupts.
 
+    Appends the user turn immediately. On normal completion, appends the assistant
+    turn to history. If the main thread sets interrupt_event mid-stream, this
+    function stops feeding TTS and leaves the assistant turn for handle_interrupt()
+    to record (with the actually-spoken portion only).
+    """
     conversation_history.append({"role": "user", "content": text})
-
     sentence_buffer = ""
     full_response = ""
-
+    with llm_partial_lock:
+        llm_partial["content"] = ""
     try:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history
         stream = ollama.chat(model=OLLAMA_MODEL, messages=messages, stream=True)
 
         for chunk in stream:
+            if interrupt_event.is_set():
+                break
             token = chunk["message"]["content"]
             print(token, end="", flush=True)
             full_response += token
             sentence_buffer += token
+            with llm_partial_lock:
+                llm_partial["content"] = full_response
 
             sentences, sentence_buffer = flush_sentences(sentence_buffer)
             for s in sentences:
+                if interrupt_event.is_set():
+                    break
                 tts_queue.put(s)
 
-        # Flush leftover text
-        if sentence_buffer.strip():
+        if not interrupt_event.is_set() and sentence_buffer.strip():
             tts_queue.put(sentence_buffer.strip())
-
-        conversation_history.append({"role": "assistant", "content": full_response})
         print()
 
     except Exception as e:
         print(f"\n[LLM error: {e}]")
         print("Make sure Ollama is running (ollama serve).")
+    finally:
+        with llm_partial_lock:
+            llm_partial["content"] = full_response
+        if not interrupt_event.is_set():
+            conversation_history.append({"role": "assistant", "content": full_response})
+
+
+def handle_interrupt():
+    """User barged in. Stop TTS+LLM and record the partial assistant turn."""
+    interrupt_event.set()
+    sd.stop()
+    # Drain pending sentences so they don't leak into the next turn
+    while True:
+        try:
+            tts_queue.get_nowait()
+        except queue.Empty:
+            break
+    # Give the LLM thread a moment to notice the event and exit its stream
+    t = llm_thread_ref["t"]
+    if t is not None and t.is_alive():
+        t.join(timeout=1.0)
+
+    with tts_progress_lock, llm_partial_lock:
+        spoken = list(tts_spoken)
+        cur_text = tts_current["text"]
+        cur_started = tts_current["started"]
+        cur_duration = tts_current["duration"]
+        tts_spoken.clear()
+        tts_current["text"] = None
+        tts_current["started"] = None
+        tts_current["duration"] = None
+        llm_partial["content"] = ""
+
+    cutoff_word = None
+    if cur_text and cur_started is not None and cur_duration:
+        # Estimate where in the current sentence TTS was cut off.
+        elapsed = time.monotonic() - cur_started
+        frac = min(max(elapsed / cur_duration, 0.0), 1.0)
+        words = cur_text.split()
+        if words:
+            word_idx = max(1, int(round(len(words) * frac)))
+            spoken.append(" ".join(words[:word_idx]))
+            cutoff_word = words[min(word_idx, len(words)) - 1]
+
+    spoken_text = " ".join(s for s in spoken if s).strip()
+    if spoken_text:
+        conversation_history.append({"role": "assistant", "content": spoken_text})
+        note = "[The user interrupted you mid-response"
+        if cutoff_word:
+            note += f" right after the word '{cutoff_word}'"
+        note += ". Respond to what they say next without repeating what you already said.]"
+    else:
+        note = "[The user interrupted you before you could speak. Listen to what they say next.]"
+    conversation_history.append({"role": "system", "content": note})
+
+    sys.stdout.write("\n  [interrupted — listening]" + " " * 40 + "\n")
+    sys.stdout.flush()
+    # Leave interrupt_event set — it'll be cleared when the next LLM turn starts.
+    # This keeps any straggler sentences from a slow-to-cancel LLM thread from
+    # leaking into the following turn.
+    is_speaking.clear()
 
 
 def audio_callback(indata, frames, time_info, status):
@@ -274,7 +366,7 @@ def main():
     print("=" * 50)
 
     # Pre-flight checks
-    print("\n[1/4] Checking Ollama...", end=" ", flush=True)
+    print("\n[1/5] Checking Ollama...", end=" ", flush=True)
     if not check_ollama():
         print("FAILED - run 'ollama serve' first.")
         sys.exit(1)
@@ -312,6 +404,12 @@ def main():
     min_speech_blocks = int(MIN_SPEECH_DURATION / BLOCK_DURATION)
     level_counter = 0
 
+    # Interrupt VAD (active only while the assistant is speaking)
+    interrupt_threshold = start_threshold * INTERRUPT_THRESHOLD_MULT
+    interrupt_min_blocks = int(MIN_INTERRUPT_SPEECH_DURATION / BLOCK_DURATION)
+    interrupt_buffer = []
+    interrupt_speech_blocks = 0
+
     try:
         with sd.InputStream(
             samplerate=SAMPLE_RATE,
@@ -327,13 +425,30 @@ def main():
                 except queue.Empty:
                     continue
 
-                # Skip mic input while assistant is speaking
+                # While assistant is speaking, listen for a barge-in
                 if is_speaking.is_set():
-                    audio_buffer = []
-                    is_speech = False
-                    silence_blocks = 0
-                    speech_blocks = 0
+                    rms = np.sqrt(np.mean(data.astype(np.float64) ** 2))
+                    if rms > interrupt_threshold:
+                        interrupt_buffer.append(data)
+                        interrupt_speech_blocks += 1
+                    else:
+                        interrupt_buffer = []
+                        interrupt_speech_blocks = 0
+                    if interrupt_speech_blocks >= interrupt_min_blocks and is_speaking.is_set():
+                        handle_interrupt()
+                        # Carry the interrupt audio into the normal capture so the
+                        # user's utterance isn't lost.
+                        audio_buffer = list(interrupt_buffer)
+                        is_speech = True
+                        silence_blocks = 0
+                        speech_blocks = interrupt_speech_blocks
+                        interrupt_buffer = []
+                        interrupt_speech_blocks = 0
                     continue
+
+                # Reset interrupt VAD state when assistant is idle
+                interrupt_buffer = []
+                interrupt_speech_blocks = 0
 
                 rms = np.sqrt(np.mean(data.astype(np.float64) ** 2))
 
@@ -390,7 +505,15 @@ def main():
                             ).strip()
 
                             if text and len(text) > 1:
-                                process_with_llm(text)
+                                sys.stdout.write("\r" + " " * 80 + "\r")
+                                print(f"\n You: {text}")
+                                print(" Assistant: ", end="", flush=True)
+                                interrupt_event.clear()
+                                is_speaking.set()
+                                llm_thread_ref["t"] = threading.Thread(
+                                    target=llm_worker, args=(text,), daemon=True
+                                )
+                                llm_thread_ref["t"].start()
                             else:
                                 sys.stdout.write("\r" + " " * 80 + "\r")
                                 sys.stdout.flush()

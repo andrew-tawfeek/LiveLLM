@@ -55,6 +55,8 @@ On startup you'll be asked to pick a **Piper voice** and a **microphone**, then 
 3. Stream the response from the LLM
 4. Speak each sentence aloud as it arrives
 
+**Barge in at any time.** If you start talking while the assistant is responding (≥ `MIN_INTERRUPT_SPEECH_DURATION` seconds of sustained speech above `start_threshold × INTERRUPT_THRESHOLD_MULT`), it will cut itself off, log a system note in the conversation saying where it was interrupted, and start listening to you. This lets you correct course without waiting for it to finish.
+
 Press **Ctrl+C** to exit.
 
 ## Configuration
@@ -67,6 +69,8 @@ Edit the constants at the top of `main.py`:
 | `WHISPER_MODEL` | `base` | Whisper size: `tiny`, `base`, `small`, `medium` |
 | `SILENCE_DURATION` | `1.5` | Seconds of silence before processing speech |
 | `MIN_SPEECH_DURATION` | `0.5` | Minimum speech length to process (filters noise) |
+| `MIN_INTERRUPT_SPEECH_DURATION` | `1.0` | Seconds of sustained speech to barge in on the assistant |
+| `INTERRUPT_THRESHOLD_MULT` | `2.0` | Barge-in requires volume > `start_threshold × this` (guards against feedback) |
 | `PIPER_VOICE_PATH` | `models/piper/en_US-ryan-high.onnx` | Default voice if only one is installed; also the default highlighted in the launch picker (see [Changing the Voice](#changing-the-voice)) |
 | `TTS_SPEED` | `1.2` | Piper speech speed (higher = faster; maps to `1/length_scale`) |
 | `TTS_PITCH` | `1.0` | Playback pitch shift. `0.9` ≈ 2 semitones down; `1.1` ≈ 2 up. Duration auto-compensates. |
