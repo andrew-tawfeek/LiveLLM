@@ -56,6 +56,7 @@ SYSTEM_PROMPT = (
     "You are a helpful voice assistant. Keep responses concise and "
     "conversational - aim for 1-3 sentences unless the user asks for detail."
 )
+MAX_HISTORY_MESSAGES = 40  # cap in-memory transcript; older turns are dropped
 
 # --- Shared State ---
 audio_queue = queue.Queue()
@@ -68,10 +69,12 @@ conversation_history = []
 tts_progress_lock = threading.Lock()
 tts_spoken = []                # fully-played sentences since the last user turn
 tts_current = {"text": None, "started": None, "duration": None}
-llm_partial_lock = threading.Lock()
-llm_partial = {"content": ""}  # streaming LLM output so far
 
-llm_thread_ref = {"t": None}   # handle to the in-flight LLM worker thread
+llm_thread = None              # in-flight LLM worker thread (main-thread access only)
+
+
+def compute_rms(block):
+    return np.sqrt(np.mean(block.astype(np.float64) ** 2))
 
 
 def synthesize_piper(voice, text):
@@ -97,7 +100,6 @@ def synthesize_piper(voice, text):
 
 
 def tts_worker():
-    # Using Piper via the piper-tts pip package (Try A: pip install succeeded).
     try:
         voice = PiperVoice.load(PIPER_VOICE_PATH)
         print("[TTS ready]", file=sys.stderr)
@@ -133,7 +135,6 @@ def tts_worker():
                     tts_current["duration"] = None
         except Exception as e:
             print(f"[TTS error: {e}]", file=sys.stderr)
-        time.sleep(0.05)
         if tts_queue.empty():
             is_speaking.clear()
 
@@ -174,8 +175,6 @@ def llm_worker(text):
     conversation_history.append({"role": "user", "content": text})
     sentence_buffer = ""
     full_response = ""
-    with llm_partial_lock:
-        llm_partial["content"] = ""
     try:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history
         stream = ollama.chat(model=OLLAMA_MODEL, messages=messages, stream=True)
@@ -187,8 +186,6 @@ def llm_worker(text):
             print(token, end="", flush=True)
             full_response += token
             sentence_buffer += token
-            with llm_partial_lock:
-                llm_partial["content"] = full_response
 
             sentences, sentence_buffer = flush_sentences(sentence_buffer)
             for s in sentences:
@@ -204,10 +201,12 @@ def llm_worker(text):
         print(f"\n[LLM error: {e}]")
         print("Make sure Ollama is running (ollama serve).")
     finally:
-        with llm_partial_lock:
-            llm_partial["content"] = full_response
         if not interrupt_event.is_set():
             conversation_history.append({"role": "assistant", "content": full_response})
+            with tts_progress_lock:
+                tts_spoken.clear()
+        if len(conversation_history) > MAX_HISTORY_MESSAGES:
+            del conversation_history[: len(conversation_history) - MAX_HISTORY_MESSAGES]
 
 
 def handle_interrupt():
@@ -221,11 +220,10 @@ def handle_interrupt():
         except queue.Empty:
             break
     # Give the LLM thread a moment to notice the event and exit its stream
-    t = llm_thread_ref["t"]
-    if t is not None and t.is_alive():
-        t.join(timeout=1.0)
+    if llm_thread is not None and llm_thread.is_alive():
+        llm_thread.join(timeout=1.0)
 
-    with tts_progress_lock, llm_partial_lock:
+    with tts_progress_lock:
         spoken = list(tts_spoken)
         cur_text = tts_current["text"]
         cur_started = tts_current["started"]
@@ -234,7 +232,6 @@ def handle_interrupt():
         tts_current["text"] = None
         tts_current["started"] = None
         tts_current["duration"] = None
-        llm_partial["content"] = ""
 
     cutoff_word = None
     if cur_text and cur_started is not None and cur_duration:
@@ -282,7 +279,6 @@ def pick_input_device():
         print(f"  Using configured device {INPUT_DEVICE}: {info['name']}")
         return INPUT_DEVICE
 
-    # List input devices
     devices = sd.query_devices()
     input_devs = []
     for i, d in enumerate(devices):
@@ -316,7 +312,7 @@ def calibrate_mic(device):
         device=device,
     )
     sd.wait()
-    noise_rms = np.sqrt(np.mean(recording.astype(np.float64) ** 2))
+    noise_rms = compute_rms(recording)
     start_threshold = max(noise_rms * 1.5, 200)
     continue_threshold = max(noise_rms * 1.2, 150)
     print(f"  Noise floor: {noise_rms:.0f}")
@@ -371,11 +367,12 @@ def pick_voice():
 
 
 def main():
+    global llm_thread
+
     print("=" * 50)
     print("  LiveLLM - Local Voice Assistant")
     print("=" * 50)
 
-    # Pre-flight checks
     print("\n[1/5] Checking Ollama...", end=" ", flush=True)
     if not check_ollama():
         print("FAILED - run 'ollama serve' first.")
@@ -437,7 +434,7 @@ def main():
 
                 # While assistant is speaking, listen for a barge-in
                 if is_speaking.is_set():
-                    rms = np.sqrt(np.mean(data.astype(np.float64) ** 2))
+                    rms = compute_rms(data)
                     if rms > interrupt_threshold:
                         interrupt_buffer.append(data)
                         interrupt_speech_blocks += 1
@@ -466,11 +463,10 @@ def main():
                         interrupt_speech_blocks = 0
                     continue
 
-                # Reset interrupt VAD state when assistant is idle
                 interrupt_buffer = []
                 interrupt_speech_blocks = 0
 
-                rms = np.sqrt(np.mean(data.astype(np.float64) ** 2))
+                rms = compute_rms(data)
 
                 # Show live levels every ~0.5s when idle
                 if DEBUG_LEVELS and not is_speech:
@@ -484,13 +480,10 @@ def main():
                         )
                         sys.stdout.flush()
 
-                # Use start_threshold to begin, continue_threshold to keep going
                 active_threshold = continue_threshold if is_speech else start_threshold
 
                 if rms > active_threshold:
-                    # Speech detected (or continuing)
-                    if not is_speech:
-                        is_speech = True
+                    is_speech = True
                     silence_blocks = 0
                     speech_blocks += 1
                     audio_buffer.append(data)
@@ -500,13 +493,12 @@ def main():
                     )
                     sys.stdout.flush()
                 elif is_speech:
-                    # Silence during speech — keep buffering (captures pauses)
+                    # Keep buffering through short silences so mid-utterance pauses aren't cut off.
                     silence_blocks += 1
                     audio_buffer.append(data)
 
                     if silence_blocks >= blocks_for_silence:
                         if speech_blocks >= min_speech_blocks:
-                            # End of utterance - transcribe
                             full_audio = np.concatenate(audio_buffer)
                             audio_buffer = []
                             is_speech = False
@@ -530,15 +522,14 @@ def main():
                                 print(" Assistant: ", end="", flush=True)
                                 interrupt_event.clear()
                                 is_speaking.set()
-                                llm_thread_ref["t"] = threading.Thread(
+                                llm_thread = threading.Thread(
                                     target=llm_worker, args=(text,), daemon=True
                                 )
-                                llm_thread_ref["t"].start()
+                                llm_thread.start()
                             else:
                                 sys.stdout.write("\r" + " " * 80 + "\r")
                                 sys.stdout.flush()
                         else:
-                            # Too short, discard
                             audio_buffer = []
                             is_speech = False
                             silence_blocks = 0
