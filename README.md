@@ -72,7 +72,7 @@ Edit the constants at the top of `main.py`:
 | `MIN_INTERRUPT_SPEECH_DURATION` | `1.0` | Seconds of sustained speech to barge in on the assistant |
 | `INTERRUPT_THRESHOLD_MULT` | `1.5` | Barge-in requires volume > `start_threshold × this` (guards against feedback) |
 | `DEBUG_INTERRUPT` | `False` | Print live RMS / threshold / held-duration while assistant speaks. Useful for tuning barge-in thresholds; scrambles the streaming token display when on. |
-| `PIPER_VOICE_PATH` | `models/piper/en_US-ryan-high.onnx` | Default voice if only one is installed; also the default highlighted in the launch picker (see [Changing the Voice](#changing-the-voice)) |
+| `PIPER_VOICE_PATH` | `models/piper/en_US-amy-medium.onnx` | Default voice if only one is installed; also the default highlighted in the launch picker (see [Changing the Voice](#changing-the-voice)) |
 | `TTS_SPEED` | `1.2` | Piper speech speed (higher = faster; maps to `1/length_scale`) |
 | `TTS_PITCH` | `1.0` | Playback pitch shift. `0.9` ≈ 2 semitones down; `1.1` ≈ 2 up. Duration auto-compensates. |
 | `TTS_NOISE_SCALE` | `0.85` | Prosody/intonation variability (voice default ~0.667). Set to `None` to use the voice's own default. Lower = flatter, higher = more expressive pitch swings |
@@ -94,11 +94,11 @@ Run `python list_devices.py` to see all audio device indices.
   Installed Piper voices:
     [0] en_GB-alan-medium.onnx
     [1] en_GB-jenny_dioco-medium.onnx
-    [2] en_US-amy-medium.onnx
+    [2] en_US-amy-medium.onnx (default)
     [3] en_US-hfc_female-medium.onnx
     [4] en_US-lessac-medium.onnx
     [5] en_US-libritts_r-medium.onnx
-    [6] en_US-ryan-high.onnx (default)
+    [6] en_US-ryan-high.onnx
   Pick a voice [0-6]:
 ```
 
@@ -108,8 +108,8 @@ The default highlighted in the picker is whatever `PIPER_VOICE_PATH` points at i
 
 | Voice | Size | Character |
 |---|---|---|
-| `en_US-ryan-high` (default) | ~116 MB | Male, American, broadcast-style |
-| `en_US-amy-medium` | ~63 MB | Female, American, warm |
+| `en_US-amy-medium` (default) | ~63 MB | Female, American, warm |
+| `en_US-ryan-high` | ~116 MB | Male, American, broadcast-style |
 | `en_US-hfc_female-medium` | ~63 MB | Female, American, neutral/clean |
 | `en_US-lessac-medium` | ~61 MB | Female, American, audiobook cadence |
 | `en_GB-jenny_dioco-medium` | ~63 MB | Female, British |
@@ -162,7 +162,7 @@ Models like `en_US-libritts_r-medium` ship hundreds of speakers in one file. Pic
 
 **TTS not speaking**
 - Check Windows volume and output device
-- TTS uses Piper — confirm `models/piper/en_US-ryan-high.onnx` and its `.json` exist (run.bat downloads them on first run)
+- TTS uses Piper — confirm `models/piper/en_US-amy-medium.onnx` and its `.json` exist (run.bat downloads them on first run)
 
 **Ollama errors**
 - Make sure Ollama is running: `ollama serve`
