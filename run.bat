@@ -47,19 +47,19 @@ if not exist "venv\Scripts\activate.bat" (
 )
 
 :: Download Piper voice model on first run
-if not exist "models\piper\en_US-lessac-medium.onnx" (
+if not exist "models\piper\en_US-ryan-high.onnx" (
     echo [Setup] Downloading Piper voice model...
     if not exist "models\piper" mkdir "models\piper"
-    curl -L -o "models\piper\en_US-lessac-medium.onnx" "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx"
+    curl -L -o "models\piper\en_US-ryan-high.onnx" "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx"
     if errorlevel 1 (
         echo ERROR: Failed to download Piper voice model.
         pause
         exit /b 1
     )
 )
-if not exist "models\piper\en_US-lessac-medium.onnx.json" (
+if not exist "models\piper\en_US-ryan-high.onnx.json" (
     echo [Setup] Downloading Piper voice config...
-    curl -L -o "models\piper\en_US-lessac-medium.onnx.json" "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"
+    curl -L -o "models\piper\en_US-ryan-high.onnx.json" "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx.json"
     if errorlevel 1 (
         echo ERROR: Failed to download Piper voice config.
         pause

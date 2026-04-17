@@ -28,7 +28,7 @@ WHISPER_MODEL = "base"  # Options: tiny, base, small, medium
 SILENCE_DURATION = 1.5  # seconds of silence = end of utterance
 MIN_SPEECH_DURATION = 0.5  # minimum speech length to process
 DEBUG_LEVELS = True  # show live audio RMS levels
-PIPER_VOICE_PATH = "models/piper/en_US-lessac-medium.onnx"
+PIPER_VOICE_PATH = "models/piper/en_US-ryan-high.onnx"
 TTS_SPEED = 1.0  # 1.0 = natural pace; higher = faster
 INPUT_DEVICE = None  # Set to a device index to override (see list_devices.py)
 SYSTEM_PROMPT = (
