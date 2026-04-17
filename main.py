@@ -30,11 +30,11 @@ MIN_SPEECH_DURATION = 0.5  # minimum speech length to process
 DEBUG_LEVELS = True  # show live audio RMS levels
 # --- Piper Voice Config ---
 # Any path in models/piper/ will also appear in the launch-time voice picker.
-PIPER_VOICE_PATH = "models/piper/en_US-ryan-high.onnx"
+PIPER_VOICE_PATH = "models/piper/en_US-amy-medium.onnx"
 TTS_SPEED = 1.2          # 1.0 natural; >1 faster, <1 slower (length_scale = 1/TTS_SPEED)
-TTS_NOISE_SCALE = None   # Prosody/intonation variability. None = voice default (~0.667).
+TTS_NOISE_SCALE = 0.85   # Prosody/intonation variability. None = voice default (~0.667).
                          #   lower -> flatter/monotone; higher -> more expressive pitch swings
-TTS_NOISE_W_SCALE = None # Rhythm/timing variability. None = voice default (~0.8).
+TTS_NOISE_W_SCALE = 1.0  # Rhythm/timing variability. None = voice default (~0.8).
                          #   lower -> metronomic pacing; higher -> looser, more casual rhythm
 TTS_VOLUME = 1.0         # Output gain multiplier (1.0 = unchanged)
 TTS_NORMALIZE = True     # Normalize loudness across sentences. False preserves natural dynamics.
@@ -64,7 +64,11 @@ def synthesize_piper(voice, text):
     )
     chunks = [c.audio_int16_array for c in voice.synthesize(text, syn_config=syn_config)]
     samples = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.int16)
-    return samples, voice.config.sample_rate
+    sample_rate = voice.config.sample_rate
+    # Pad ~200ms trailing silence so sounddevice doesn't clip the sentence tail.
+    if samples.size:
+        samples = np.concatenate([samples, np.zeros(int(sample_rate * 0.2), dtype=np.int16)])
+    return samples, sample_rate
 
 
 def tts_worker():
