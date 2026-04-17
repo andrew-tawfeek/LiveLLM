@@ -205,6 +205,44 @@ def check_ollama():
         return False
 
 
+def pick_voice():
+    """Scan models/piper/ for .onnx voices and let the user pick one."""
+    global PIPER_VOICE_PATH
+    import glob
+    import os
+
+    voices = sorted(glob.glob("models/piper/*.onnx"))
+    if not voices:
+        print("  No Piper voices found in models/piper/. Run run.bat to download.")
+        sys.exit(1)
+
+    if len(voices) == 1:
+        PIPER_VOICE_PATH = voices[0]
+        print(f"  Using only installed voice: {os.path.basename(PIPER_VOICE_PATH)}")
+        return
+
+    default_voice = PIPER_VOICE_PATH.replace("\\", "/")
+    print("  Installed Piper voices:")
+    for idx, path in enumerate(voices):
+        mark = " (default)" if path.replace("\\", "/") == default_voice else ""
+        print(f"    [{idx}] {os.path.basename(path)}{mark}")
+
+    while True:
+        try:
+            choice = input(f"  Pick a voice [0-{len(voices) - 1}]: ").strip()
+            if choice == "":
+                print(f"  Selected: {os.path.basename(PIPER_VOICE_PATH)}")
+                return
+            choice_idx = int(choice)
+            if 0 <= choice_idx < len(voices):
+                PIPER_VOICE_PATH = voices[choice_idx]
+                print(f"  Selected: {os.path.basename(PIPER_VOICE_PATH)}")
+                return
+        except (ValueError, EOFError):
+            pass
+        print("  Invalid choice, try again.")
+
+
 def main():
     print("=" * 50)
     print("  LiveLLM - Local Voice Assistant")
@@ -217,16 +255,19 @@ def main():
         sys.exit(1)
     print("OK")
 
-    print("[2/4] Loading Whisper STT model...", end=" ", flush=True)
+    print("[2/5] Loading Whisper STT model...", end=" ", flush=True)
     whisper_model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
     print("OK")
 
-    print("[3/4] Starting TTS engine...", end=" ", flush=True)
+    print("[3/5] Selecting Piper voice...")
+    pick_voice()
+
+    print("[4/5] Starting TTS engine...", end=" ", flush=True)
     tts_thread = threading.Thread(target=tts_worker, daemon=True)
     tts_thread.start()
     print("OK")
 
-    print("[4/4] Selecting microphone...")
+    print("[5/5] Selecting microphone...")
     device_id = pick_input_device()
 
     print("  Calibrating...")

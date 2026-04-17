@@ -48,7 +48,7 @@ python main.py
 
 ## Usage
 
-On startup you'll be asked to pick your microphone, then the app calibrates for background noise. After that, just talk — the assistant will:
+On startup you'll be asked to pick a **Piper voice** and a **microphone**, then the app calibrates for background noise. After that, just talk — the assistant will:
 
 1. Listen until you stop speaking (~1.5s of silence)
 2. Transcribe your speech with Whisper
@@ -68,7 +68,7 @@ Edit the constants at the top of `main.py`:
 | `SILENCE_DURATION` | `1.5` | Seconds of silence before processing speech |
 | `MIN_SPEECH_DURATION` | `0.5` | Minimum speech length to process (filters noise) |
 | `TTS_SPEED` | `1.0` | Piper speech speed (higher = faster) |
-| `PIPER_VOICE_PATH` | `models/piper/en_US-ryan-high.onnx` | Piper ONNX voice model (see [Changing the Voice](#changing-the-voice)) |
+| `PIPER_VOICE_PATH` | `models/piper/en_US-ryan-high.onnx` | Default voice if only one is installed; also the default highlighted in the launch picker (see [Changing the Voice](#changing-the-voice)) |
 | `INPUT_DEVICE` | `None` | Set to a device index to skip the mic picker |
 | `DEBUG_LEVELS` | `True` | Show live audio RMS meter while idle |
 
@@ -76,32 +76,47 @@ Run `python list_devices.py` to see all audio device indices.
 
 ## Changing the Voice
 
-The default voice is **`en_US-ryan-high`** (male, American, high-fidelity — ~116 MB). To try another speaker, accent, or fidelity tier:
+`run.bat` downloads a curated set of seven English Piper voices on first launch (~500 MB total). At startup the app lists every `.onnx` in `models/piper/` and lets you pick one for the session:
 
-1. Pick a voice from the [Piper voices repo on Hugging Face](https://huggingface.co/rhasspy/piper-voices/tree/main/en). The path pattern is `en/<locale>/<speaker>/<quality>/<name>.onnx`.
+```
+[3/5] Selecting Piper voice...
+  Installed Piper voices:
+    [0] en_GB-alan-medium.onnx
+    [1] en_GB-jenny_dioco-medium.onnx
+    [2] en_US-amy-medium.onnx
+    [3] en_US-hfc_female-medium.onnx
+    [4] en_US-lessac-medium.onnx
+    [5] en_US-libritts_r-medium.onnx
+    [6] en_US-ryan-high.onnx (default)
+  Pick a voice [0-6]:
+```
 
-2. Download both files into `models/piper/`. For example, to grab `en_US-amy-medium`:
+The default highlighted in the picker is whatever `PIPER_VOICE_PATH` points at in `main.py`. To make a different voice the permanent default, edit that constant.
 
-   ```bash
-   curl -L -o models/piper/en_US-amy-medium.onnx ^
-     https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx
-   curl -L -o models/piper/en_US-amy-medium.onnx.json ^
-     https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json
-   ```
-
-3. Point `PIPER_VOICE_PATH` in `main.py` at the new `.onnx` file. Restart the app.
-
-### Good voices to try
+### Bundled voices
 
 | Voice | Size | Character |
 |---|---|---|
-| `en_US-ryan-high` (default) | ~116 MB | Male, clear, broadcast-style |
-| `en_US-amy-medium` | ~63 MB | Female, warm |
-| `en_US-hfc_female-medium` | ~63 MB | Female, neutral/clean |
-| `en_US-lessac-medium` | ~61 MB | Female, audiobook cadence |
-| `en_GB-jenny_dioco-medium` | ~63 MB | British female |
-| `en_GB-alan-medium` | ~63 MB | British male |
+| `en_US-ryan-high` (default) | ~116 MB | Male, American, broadcast-style |
+| `en_US-amy-medium` | ~63 MB | Female, American, warm |
+| `en_US-hfc_female-medium` | ~63 MB | Female, American, neutral/clean |
+| `en_US-lessac-medium` | ~61 MB | Female, American, audiobook cadence |
+| `en_GB-jenny_dioco-medium` | ~63 MB | Female, British |
+| `en_GB-alan-medium` | ~63 MB | Male, British |
 | `en_US-libritts_r-medium` | ~75 MB | Multi-speaker (~900 speakers — select via `speaker_id`) |
+
+### Adding more voices
+
+Any `.onnx` + matching `.onnx.json` pair dropped into `models/piper/` will show up in the picker automatically. Browse the full catalog — more accents, speakers, quality tiers — at the [Piper voices repo on Hugging Face](https://huggingface.co/rhasspy/piper-voices/tree/main). Path pattern: `<lang>/<locale>/<speaker>/<quality>/<name>.onnx`. Example:
+
+```bash
+curl -L -o models/piper/en_US-joe-medium.onnx ^
+  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/joe/medium/en_US-joe-medium.onnx
+curl -L -o models/piper/en_US-joe-medium.onnx.json ^
+  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/joe/medium/en_US-joe-medium.onnx.json
+```
+
+Restart the app and it'll appear in the picker.
 
 ### Quality tiers
 
