@@ -2,4 +2,6 @@ sounddevice
 numpy
 ollama
 faster-whisper
-pywin32
+kokoro-onnx
+soundfile
+onnxruntime

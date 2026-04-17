@@ -1,6 +1,6 @@
 """
 LiveLLM - Local Voice Assistant Pipeline
-Microphone -> faster-whisper STT -> Ollama LLM -> Windows SAPI TTS -> Speaker
+Microphone -> faster-whisper STT -> Ollama LLM -> Kokoro-82M TTS -> Speaker
 
 Usage: python main.py
 Requirements: Ollama running with qwen2.5:7b pulled
@@ -26,7 +26,10 @@ WHISPER_MODEL = "base"  # Options: tiny, base, small, medium
 SILENCE_DURATION = 1.5  # seconds of silence = end of utterance
 MIN_SPEECH_DURATION = 0.5  # minimum speech length to process
 DEBUG_LEVELS = True  # show live audio RMS levels
-TTS_RATE = 2  # SAPI rate: -10 (slowest) to 10 (fastest)
+KOKORO_MODEL_PATH = "models/kokoro/kokoro-v1.0.onnx"
+KOKORO_VOICES_PATH = "models/kokoro/voices-v1.0.bin"
+TTS_VOICE = "af_sarah"
+TTS_SPEED = 1.0
 INPUT_DEVICE = None  # Set to a device index to override (see list_devices.py)
 SYSTEM_PROMPT = (
     "You are a helpful voice assistant. Keep responses concise and "
@@ -41,25 +44,13 @@ conversation_history = []
 
 
 def tts_worker():
-    """Speak sentences using Windows SAPI directly via COM.
-
-    Uses win32com.client with explicit COM initialization on this thread,
-    which avoids the threading bugs that plague pyttsx3.
-    """
-    import pythoncom
-    import win32com.client
-
-    pythoncom.CoInitialize()
+    # Kokoro-82M neural TTS via kokoro-onnx; voice id is TTS_VOICE (e.g. af_sarah).
     try:
-        speaker = win32com.client.Dispatch("SAPI.SpVoice")
-        speaker.Rate = TTS_RATE
-        # Speak a space to confirm TTS works
-        speaker.Speak(" ")
+        from kokoro_onnx import Kokoro
+        kokoro = Kokoro(KOKORO_MODEL_PATH, KOKORO_VOICES_PATH)
         print("[TTS ready]", file=sys.stderr)
     except Exception as e:
         print(f"[TTS init failed: {e}]", file=sys.stderr)
-        pythoncom.CoUninitialize()
-        # Drain the queue so the program doesn't hang
         while True:
             if tts_queue.get() is None:
                 break
@@ -71,14 +62,14 @@ def tts_worker():
             break
         is_speaking.set()
         try:
-            speaker.Speak(text)
+            samples, sr = kokoro.create(text, voice=TTS_VOICE, speed=TTS_SPEED, lang="en-us")
+            sd.play(samples, sr)
+            sd.wait()
         except Exception as e:
             print(f"[TTS error: {e}]", file=sys.stderr)
         time.sleep(0.05)
         if tts_queue.empty():
             is_speaking.clear()
-
-    pythoncom.CoUninitialize()
 
 
 def flush_sentences(buffer):

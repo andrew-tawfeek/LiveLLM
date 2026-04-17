@@ -46,6 +46,27 @@ if not exist "venv\Scripts\activate.bat" (
     call venv\Scripts\activate.bat
 )
 
+:: Download Kokoro TTS model files if missing
+if not exist "models\kokoro\kokoro-v1.0.onnx" (
+    echo [Setup] Downloading Kokoro TTS model ^(~325 MB^)...
+    if not exist "models\kokoro" mkdir "models\kokoro"
+    curl -L -o "models\kokoro\kokoro-v1.0.onnx" "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
+    if errorlevel 1 (
+        echo ERROR: Failed to download Kokoro model.
+        pause
+        exit /b 1
+    )
+)
+if not exist "models\kokoro\voices-v1.0.bin" (
+    echo [Setup] Downloading Kokoro voices ^(~27 MB^)...
+    curl -L -o "models\kokoro\voices-v1.0.bin" "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
+    if errorlevel 1 (
+        echo ERROR: Failed to download Kokoro voices.
+        pause
+        exit /b 1
+    )
+)
+
 :: Start Ollama if not running
 "%OLLAMA_CMD%" list >nul 2>&1
 if errorlevel 1 (
