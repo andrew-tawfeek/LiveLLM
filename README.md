@@ -70,7 +70,8 @@ Edit the constants at the top of `main.py`:
 | `SILENCE_DURATION` | `1.5` | Seconds of silence before processing speech |
 | `MIN_SPEECH_DURATION` | `0.5` | Minimum speech length to process (filters noise) |
 | `MIN_INTERRUPT_SPEECH_DURATION` | `1.0` | Seconds of sustained speech to barge in on the assistant |
-| `INTERRUPT_THRESHOLD_MULT` | `2.0` | Barge-in requires volume > `start_threshold × this` (guards against feedback) |
+| `INTERRUPT_THRESHOLD_MULT` | `1.5` | Barge-in requires volume > `start_threshold × this` (guards against feedback) |
+| `DEBUG_INTERRUPT` | `False` | Print live RMS / threshold / held-duration while assistant speaks. Useful for tuning barge-in thresholds; scrambles the streaming token display when on. |
 | `PIPER_VOICE_PATH` | `models/piper/en_US-ryan-high.onnx` | Default voice if only one is installed; also the default highlighted in the launch picker (see [Changing the Voice](#changing-the-voice)) |
 | `TTS_SPEED` | `1.2` | Piper speech speed (higher = faster; maps to `1/length_scale`) |
 | `TTS_PITCH` | `1.0` | Playback pitch shift. `0.9` ≈ 2 semitones down; `1.1` ≈ 2 up. Duration auto-compensates. |
