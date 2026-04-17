@@ -35,7 +35,7 @@ MIN_SPEECH_DURATION = 0.5  # minimum speech length to process
 DEBUG_LEVELS = True  # show live audio RMS levels
 # --- Interrupt (barge-in) Config ---
 MIN_INTERRUPT_SPEECH_DURATION = 1.0  # sustained speech to cut off the assistant (seconds)
-INTERRUPT_THRESHOLD_MULT = 2.0       # interrupt requires rms > start_threshold * this factor
+INTERRUPT_THRESHOLD_MULT = 1.5       # interrupt requires rms > start_threshold * this factor
 # --- Piper Voice Config ---
 # Any path in models/piper/ will also appear in the launch-time voice picker.
 PIPER_VOICE_PATH = "models/piper/en_US-amy-medium.onnx"
@@ -442,6 +442,18 @@ def main():
                     else:
                         interrupt_buffer = []
                         interrupt_speech_blocks = 0
+                    if DEBUG_LEVELS:
+                        level_counter += 1
+                        if level_counter % 3 == 0:
+                            held = interrupt_speech_blocks * BLOCK_DURATION
+                            marker = ">>>" if rms > interrupt_threshold else "   "
+                            sys.stdout.write(
+                                f"\r  [speaking] rms: {rms:>6.0f} "
+                                f"int_thresh: {interrupt_threshold:.0f} {marker} "
+                                f"held: {held:.1f}s / {MIN_INTERRUPT_SPEECH_DURATION}s"
+                                + " " * 10
+                            )
+                            sys.stdout.flush()
                     if interrupt_speech_blocks >= interrupt_min_blocks and is_speaking.is_set():
                         handle_interrupt()
                         # Carry the interrupt audio into the normal capture so the
