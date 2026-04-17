@@ -44,6 +44,13 @@ if not exist "venv\Scripts\activate.bat" (
     )
 ) else (
     call venv\Scripts\activate.bat
+    echo [Setup] Syncing dependencies with requirements.txt...
+    pip install -q -r requirements.txt
+    if errorlevel 1 (
+        echo ERROR: Failed to sync dependencies.
+        pause
+        exit /b 1
+    )
 )
 
 :: Download Piper voice model on first run
