@@ -32,7 +32,7 @@ DEBUG_LEVELS = True  # show live audio RMS levels
 # Any path in models/piper/ will also appear in the launch-time voice picker.
 PIPER_VOICE_PATH = "models/piper/en_US-amy-medium.onnx"
 TTS_SPEED = 1.2          # 1.0 natural; >1 faster, <1 slower (length_scale = 1/TTS_SPEED)
-TTS_PITCH = 1.0          # 1.0 natural; <1.0 lower, >1.0 higher. 0.9 ~ -2 semitones.
+TTS_PITCH = 0.94          # 1.0 natural; <1.0 lower, >1.0 higher. 0.9 ~ -2 semitones.
                          #   Implemented via playback-rate shift; duration is auto-compensated.
 TTS_NOISE_SCALE = 0.85   # Prosody/intonation variability. None = voice default (~0.667).
                          #   lower -> flatter/monotone; higher -> more expressive pitch swings
