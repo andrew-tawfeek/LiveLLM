@@ -28,8 +28,17 @@ WHISPER_MODEL = "base"  # Options: tiny, base, small, medium
 SILENCE_DURATION = 1.5  # seconds of silence = end of utterance
 MIN_SPEECH_DURATION = 0.5  # minimum speech length to process
 DEBUG_LEVELS = True  # show live audio RMS levels
+# --- Piper Voice Config ---
+# Any path in models/piper/ will also appear in the launch-time voice picker.
 PIPER_VOICE_PATH = "models/piper/en_US-ryan-high.onnx"
-TTS_SPEED = 1.0  # 1.0 = natural pace; higher = faster
+TTS_SPEED = 1.2          # 1.0 natural; >1 faster, <1 slower (length_scale = 1/TTS_SPEED)
+TTS_NOISE_SCALE = None   # Prosody/intonation variability. None = voice default (~0.667).
+                         #   lower -> flatter/monotone; higher -> more expressive pitch swings
+TTS_NOISE_W_SCALE = None # Rhythm/timing variability. None = voice default (~0.8).
+                         #   lower -> metronomic pacing; higher -> looser, more casual rhythm
+TTS_VOLUME = 1.0         # Output gain multiplier (1.0 = unchanged)
+TTS_NORMALIZE = True     # Normalize loudness across sentences. False preserves natural dynamics.
+TTS_SPEAKER_ID = None    # Only for multi-speaker voices (e.g. en_US-libritts_r has ~900 ids)
 INPUT_DEVICE = None  # Set to a device index to override (see list_devices.py)
 SYSTEM_PROMPT = (
     "You are a helpful voice assistant. Keep responses concise and "
@@ -45,7 +54,14 @@ conversation_history = []
 
 def synthesize_piper(voice, text):
     """Run Piper on one sentence. Returns (int16_samples, sample_rate)."""
-    syn_config = SynthesisConfig(length_scale=1.0 / TTS_SPEED)
+    syn_config = SynthesisConfig(
+        length_scale=1.0 / TTS_SPEED,
+        noise_scale=TTS_NOISE_SCALE,
+        noise_w_scale=TTS_NOISE_W_SCALE,
+        volume=TTS_VOLUME,
+        normalize_audio=TTS_NORMALIZE,
+        speaker_id=TTS_SPEAKER_ID,
+    )
     chunks = [c.audio_int16_array for c in voice.synthesize(text, syn_config=syn_config)]
     samples = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.int16)
     return samples, voice.config.sample_rate

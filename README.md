@@ -67,8 +67,13 @@ Edit the constants at the top of `main.py`:
 | `WHISPER_MODEL` | `base` | Whisper size: `tiny`, `base`, `small`, `medium` |
 | `SILENCE_DURATION` | `1.5` | Seconds of silence before processing speech |
 | `MIN_SPEECH_DURATION` | `0.5` | Minimum speech length to process (filters noise) |
-| `TTS_SPEED` | `1.0` | Piper speech speed (higher = faster) |
 | `PIPER_VOICE_PATH` | `models/piper/en_US-ryan-high.onnx` | Default voice if only one is installed; also the default highlighted in the launch picker (see [Changing the Voice](#changing-the-voice)) |
+| `TTS_SPEED` | `1.2` | Piper speech speed (higher = faster; maps to `1/length_scale`) |
+| `TTS_NOISE_SCALE` | `None` | Prosody/intonation variability. `None` = voice default (~0.667). Lower = flatter, higher = more expressive pitch swings |
+| `TTS_NOISE_W_SCALE` | `None` | Rhythm/timing variability. `None` = voice default (~0.8). Lower = metronomic, higher = looser pacing |
+| `TTS_VOLUME` | `1.0` | Output gain multiplier |
+| `TTS_NORMALIZE` | `True` | Normalize loudness across sentences. Set `False` to preserve natural dynamics |
+| `TTS_SPEAKER_ID` | `None` | Multi-speaker voices only (e.g. `en_US-libritts_r` has ~900 ids) |
 | `INPUT_DEVICE` | `None` | Set to a device index to skip the mic picker |
 | `DEBUG_LEVELS` | `True` | Show live audio RMS meter while idle |
 
