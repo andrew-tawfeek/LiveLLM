@@ -44,7 +44,48 @@ if not exist "venv\Scripts\activate.bat" (
     )
 ) else (
     call venv\Scripts\activate.bat
+    echo [Setup] Syncing dependencies with requirements.txt...
+    pip install -q -r requirements.txt
+    if errorlevel 1 (
+        echo ERROR: Failed to sync dependencies.
+        pause
+        exit /b 1
+    )
 )
+
+:: Download Piper voice models on first run (curated English set, ~500 MB total)
+if not exist "models\piper" mkdir "models\piper"
+call :download_voice en_US/ryan/high       en_US-ryan-high
+call :download_voice en_US/amy/medium      en_US-amy-medium
+call :download_voice en_US/hfc_female/medium en_US-hfc_female-medium
+call :download_voice en_US/lessac/medium   en_US-lessac-medium
+call :download_voice en_GB/jenny_dioco/medium en_GB-jenny_dioco-medium
+call :download_voice en_GB/alan/medium     en_GB-alan-medium
+call :download_voice en_US/libritts_r/medium en_US-libritts_r-medium
+goto :voices_done
+
+:download_voice
+:: %1 = HF sub-path (e.g. en_US/ryan/high), %2 = voice filename stem
+if not exist "models\piper\%~2.onnx" (
+    echo [Setup] Downloading Piper voice: %~2 ...
+    curl -L -o "models\piper\%~2.onnx" "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/%~1/%~2.onnx"
+    if errorlevel 1 (
+        echo ERROR: Failed to download %~2.onnx
+        pause
+        exit /b 1
+    )
+)
+if not exist "models\piper\%~2.onnx.json" (
+    curl -L -o "models\piper\%~2.onnx.json" "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/%~1/%~2.onnx.json"
+    if errorlevel 1 (
+        echo ERROR: Failed to download %~2.onnx.json
+        pause
+        exit /b 1
+    )
+)
+exit /b 0
+
+:voices_done
 
 :: Start Ollama if not running
 "%OLLAMA_CMD%" list >nul 2>&1

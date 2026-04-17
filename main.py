@@ -1,6 +1,6 @@
 """
 LiveLLM - Local Voice Assistant Pipeline
-Microphone -> faster-whisper STT -> Ollama LLM -> Windows SAPI TTS -> Speaker
+Microphone -> faster-whisper STT -> Ollama LLM -> Piper TTS -> Speaker
 
 Usage: python main.py
 Requirements: Ollama running with qwen2.5:7b pulled
@@ -12,21 +12,45 @@ import threading
 import queue
 import time
 import sys
+import faulthandler
+import traceback
+
+# Print a C-level stack trace to stderr if a native crash (portaudio, etc.) occurs.
+faulthandler.enable()
 
 import ollama
 from faster_whisper import WhisperModel
+from piper import PiperVoice
+from piper.config import SynthesisConfig
 
 
 # --- Configuration ---
-OLLAMA_MODEL = "qwen2.5:7b"
+OLLAMA_MODEL = "gemma4:e2b"
 SAMPLE_RATE = 16000
 BLOCK_DURATION = 0.1  # seconds per audio block
 BLOCK_SIZE = int(SAMPLE_RATE * BLOCK_DURATION)
 WHISPER_MODEL = "base"  # Options: tiny, base, small, medium
 SILENCE_DURATION = 1.5  # seconds of silence = end of utterance
 MIN_SPEECH_DURATION = 0.5  # minimum speech length to process
-DEBUG_LEVELS = True  # show live audio RMS levels
-TTS_RATE = 2  # SAPI rate: -10 (slowest) to 10 (fastest)
+DEBUG_LEVELS = False  # show live audio RMS levels when idle
+# --- Interrupt (barge-in) Config ---
+MIN_INTERRUPT_SPEECH_DURATION = 1.0  # sustained speech to cut off the assistant (seconds)
+INTERRUPT_THRESHOLD_MULT = 1.5       # interrupt requires rms > start_threshold * this factor
+DEBUG_INTERRUPT = False              # show live RMS meter while assistant is speaking
+                                     # (useful to tune thresholds; scrambles LLM stream output)
+# --- Piper Voice Config ---
+# Any path in models/piper/ will also appear in the launch-time voice picker.
+PIPER_VOICE_PATH = "models/piper/en_US-amy-medium.onnx"
+TTS_SPEED = 1.2          # 1.0 natural; >1 faster, <1 slower (length_scale = 1/TTS_SPEED)
+TTS_PITCH = 0.94          # 1.0 natural; <1.0 lower, >1.0 higher. 0.9 ~ -2 semitones.
+                         #   Implemented via playback-rate shift; duration is auto-compensated.
+TTS_NOISE_SCALE = 0.85   # Prosody/intonation variability. None = voice default (~0.667).
+                         #   lower -> flatter/monotone; higher -> more expressive pitch swings
+TTS_NOISE_W_SCALE = 1.0  # Rhythm/timing variability. None = voice default (~0.8).
+                         #   lower -> metronomic pacing; higher -> looser, more casual rhythm
+TTS_VOLUME = 1.0         # Output gain multiplier (1.0 = unchanged)
+TTS_NORMALIZE = True     # Normalize loudness across sentences. False preserves natural dynamics.
+TTS_SPEAKER_ID = None    # Only for multi-speaker voices (e.g. en_US-libritts_r has ~900 ids)
 INPUT_DEVICE = None  # Set to a device index to override (see list_devices.py)
 SYSTEM_PROMPT = (
     "You are a helpful voice assistant. Keep responses concise and "
@@ -36,30 +60,49 @@ SYSTEM_PROMPT = (
 # --- Shared State ---
 audio_queue = queue.Queue()
 tts_queue = queue.Queue()
-is_speaking = threading.Event()
+is_speaking = threading.Event()          # assistant is generating and/or speaking
+interrupt_event = threading.Event()      # user barged in; abort LLM + TTS
 conversation_history = []
+
+# Progress tracking so an interrupt can record what was actually spoken.
+tts_progress_lock = threading.Lock()
+tts_spoken = []                # fully-played sentences since the last user turn
+tts_current = {"text": None, "started": None, "duration": None}
+llm_partial_lock = threading.Lock()
+llm_partial = {"content": ""}  # streaming LLM output so far
+
+llm_thread_ref = {"t": None}   # handle to the in-flight LLM worker thread
+
+
+def synthesize_piper(voice, text):
+    """Run Piper on one sentence. Returns (int16_samples, sample_rate)."""
+    # length_scale compensates for the TTS_PITCH-induced duration stretch so overall
+    # speed stays at TTS_SPEED regardless of pitch shift.
+    syn_config = SynthesisConfig(
+        length_scale=TTS_PITCH / TTS_SPEED,
+        noise_scale=TTS_NOISE_SCALE,
+        noise_w_scale=TTS_NOISE_W_SCALE,
+        volume=TTS_VOLUME,
+        normalize_audio=TTS_NORMALIZE,
+        speaker_id=TTS_SPEAKER_ID,
+    )
+    chunks = [c.audio_int16_array for c in voice.synthesize(text, syn_config=syn_config)]
+    samples = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.int16)
+    # Playback rate below native lowers pitch (and slows; compensated via length_scale above).
+    playback_rate = int(voice.config.sample_rate * TTS_PITCH)
+    # Pad ~200ms trailing silence so sounddevice doesn't clip the sentence tail.
+    if samples.size:
+        samples = np.concatenate([samples, np.zeros(int(playback_rate * 0.2), dtype=np.int16)])
+    return samples, playback_rate
 
 
 def tts_worker():
-    """Speak sentences using Windows SAPI directly via COM.
-
-    Uses win32com.client with explicit COM initialization on this thread,
-    which avoids the threading bugs that plague pyttsx3.
-    """
-    import pythoncom
-    import win32com.client
-
-    pythoncom.CoInitialize()
+    # Using Piper via the piper-tts pip package (Try A: pip install succeeded).
     try:
-        speaker = win32com.client.Dispatch("SAPI.SpVoice")
-        speaker.Rate = TTS_RATE
-        # Speak a space to confirm TTS works
-        speaker.Speak(" ")
+        voice = PiperVoice.load(PIPER_VOICE_PATH)
         print("[TTS ready]", file=sys.stderr)
     except Exception as e:
         print(f"[TTS init failed: {e}]", file=sys.stderr)
-        pythoncom.CoUninitialize()
-        # Drain the queue so the program doesn't hang
         while True:
             if tts_queue.get() is None:
                 break
@@ -69,16 +112,30 @@ def tts_worker():
         text = tts_queue.get()
         if text is None:
             break
+        # Drop any sentences queued during an active interrupt.
+        if interrupt_event.is_set():
+            continue
         is_speaking.set()
         try:
-            speaker.Speak(text)
+            samples, sample_rate = synthesize_piper(voice, text)
+            if samples.size and not interrupt_event.is_set():
+                with tts_progress_lock:
+                    tts_current["text"] = text
+                    tts_current["started"] = time.monotonic()
+                    tts_current["duration"] = len(samples) / sample_rate
+                sd.play(samples, sample_rate)
+                sd.wait()  # returns early when handle_interrupt() calls sd.stop()
+                with tts_progress_lock:
+                    if not interrupt_event.is_set():
+                        tts_spoken.append(text)
+                    tts_current["text"] = None
+                    tts_current["started"] = None
+                    tts_current["duration"] = None
         except Exception as e:
             print(f"[TTS error: {e}]", file=sys.stderr)
         time.sleep(0.05)
         if tts_queue.empty():
             is_speaking.clear()
-
-    pythoncom.CoUninitialize()
 
 
 def flush_sentences(buffer):
@@ -106,47 +163,116 @@ def flush_sentences(buffer):
     return sentences, buffer
 
 
-def process_with_llm(text):
-    """Send transcribed text to Ollama, stream response, queue TTS."""
-    sys.stdout.write("\r" + " " * 80 + "\r")
-    print(f"\n You: {text}")
-    print(" Assistant: ", end="", flush=True)
+def llm_worker(text):
+    """Stream LLM tokens in a thread so the main loop can still listen for interrupts.
 
+    Appends the user turn immediately. On normal completion, appends the assistant
+    turn to history. If the main thread sets interrupt_event mid-stream, this
+    function stops feeding TTS and leaves the assistant turn for handle_interrupt()
+    to record (with the actually-spoken portion only).
+    """
     conversation_history.append({"role": "user", "content": text})
-
     sentence_buffer = ""
     full_response = ""
-
+    with llm_partial_lock:
+        llm_partial["content"] = ""
     try:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history
         stream = ollama.chat(model=OLLAMA_MODEL, messages=messages, stream=True)
 
         for chunk in stream:
+            if interrupt_event.is_set():
+                break
             token = chunk["message"]["content"]
             print(token, end="", flush=True)
             full_response += token
             sentence_buffer += token
+            with llm_partial_lock:
+                llm_partial["content"] = full_response
 
             sentences, sentence_buffer = flush_sentences(sentence_buffer)
             for s in sentences:
+                if interrupt_event.is_set():
+                    break
                 tts_queue.put(s)
 
-        # Flush leftover text
-        if sentence_buffer.strip():
+        if not interrupt_event.is_set() and sentence_buffer.strip():
             tts_queue.put(sentence_buffer.strip())
-
-        conversation_history.append({"role": "assistant", "content": full_response})
         print()
 
     except Exception as e:
         print(f"\n[LLM error: {e}]")
         print("Make sure Ollama is running (ollama serve).")
+    finally:
+        with llm_partial_lock:
+            llm_partial["content"] = full_response
+        if not interrupt_event.is_set():
+            conversation_history.append({"role": "assistant", "content": full_response})
+
+
+def handle_interrupt():
+    """User barged in. Stop TTS+LLM and record the partial assistant turn."""
+    interrupt_event.set()
+    sd.stop()
+    # Drain pending sentences so they don't leak into the next turn
+    while True:
+        try:
+            tts_queue.get_nowait()
+        except queue.Empty:
+            break
+    # Give the LLM thread a moment to notice the event and exit its stream
+    t = llm_thread_ref["t"]
+    if t is not None and t.is_alive():
+        t.join(timeout=1.0)
+
+    with tts_progress_lock, llm_partial_lock:
+        spoken = list(tts_spoken)
+        cur_text = tts_current["text"]
+        cur_started = tts_current["started"]
+        cur_duration = tts_current["duration"]
+        tts_spoken.clear()
+        tts_current["text"] = None
+        tts_current["started"] = None
+        tts_current["duration"] = None
+        llm_partial["content"] = ""
+
+    cutoff_word = None
+    if cur_text and cur_started is not None and cur_duration:
+        # Estimate where in the current sentence TTS was cut off.
+        elapsed = time.monotonic() - cur_started
+        frac = min(max(elapsed / cur_duration, 0.0), 1.0)
+        words = cur_text.split()
+        if words:
+            word_idx = max(1, int(round(len(words) * frac)))
+            spoken.append(" ".join(words[:word_idx]))
+            cutoff_word = words[min(word_idx, len(words)) - 1]
+
+    spoken_text = " ".join(s for s in spoken if s).strip()
+    if spoken_text:
+        conversation_history.append({"role": "assistant", "content": spoken_text})
+        note = "[The user interrupted you mid-response"
+        if cutoff_word:
+            note += f" right after the word '{cutoff_word}'"
+        note += ". Respond to what they say next without repeating what you already said.]"
+    else:
+        note = "[The user interrupted you before you could speak. Listen to what they say next.]"
+    conversation_history.append({"role": "system", "content": note})
+
+    sys.stdout.write("\n  [interrupted — listening]" + " " * 40 + "\n")
+    sys.stdout.flush()
+    # Leave interrupt_event set — it'll be cleared when the next LLM turn starts.
+    # This keeps any straggler sentences from a slow-to-cancel LLM thread from
+    # leaking into the following turn.
+    is_speaking.clear()
 
 
 def audio_callback(indata, frames, time_info, status):
-    if status:
-        print(f"[audio: {status}]", file=sys.stderr)
-    audio_queue.put(np.frombuffer(indata, dtype=np.int16).copy())
+    try:
+        if status:
+            print(f"[audio: {status}]", file=sys.stderr, flush=True)
+        audio_queue.put(np.frombuffer(indata, dtype=np.int16).copy())
+    except Exception as e:
+        print(f"[audio callback error: {e}]", file=sys.stderr, flush=True)
 
 
 def pick_input_device():
@@ -206,28 +332,69 @@ def check_ollama():
         return False
 
 
+def pick_voice():
+    """Scan models/piper/ for .onnx voices and let the user pick one."""
+    global PIPER_VOICE_PATH
+    import glob
+    import os
+
+    voices = sorted(glob.glob("models/piper/*.onnx"))
+    if not voices:
+        print("  No Piper voices found in models/piper/. Run run.bat to download.")
+        sys.exit(1)
+
+    if len(voices) == 1:
+        PIPER_VOICE_PATH = voices[0]
+        print(f"  Using only installed voice: {os.path.basename(PIPER_VOICE_PATH)}")
+        return
+
+    default_voice = PIPER_VOICE_PATH.replace("\\", "/")
+    print("  Installed Piper voices:")
+    for idx, path in enumerate(voices):
+        mark = " (default)" if path.replace("\\", "/") == default_voice else ""
+        print(f"    [{idx}] {os.path.basename(path)}{mark}")
+
+    while True:
+        try:
+            choice = input(f"  Pick a voice [0-{len(voices) - 1}]: ").strip()
+            if choice == "":
+                print(f"  Selected: {os.path.basename(PIPER_VOICE_PATH)}")
+                return
+            choice_idx = int(choice)
+            if 0 <= choice_idx < len(voices):
+                PIPER_VOICE_PATH = voices[choice_idx]
+                print(f"  Selected: {os.path.basename(PIPER_VOICE_PATH)}")
+                return
+        except (ValueError, EOFError):
+            pass
+        print("  Invalid choice, try again.")
+
+
 def main():
     print("=" * 50)
     print("  LiveLLM - Local Voice Assistant")
     print("=" * 50)
 
     # Pre-flight checks
-    print("\n[1/4] Checking Ollama...", end=" ", flush=True)
+    print("\n[1/5] Checking Ollama...", end=" ", flush=True)
     if not check_ollama():
         print("FAILED - run 'ollama serve' first.")
         sys.exit(1)
     print("OK")
 
-    print("[2/4] Loading Whisper STT model...", end=" ", flush=True)
+    print("[2/5] Loading Whisper STT model...", end=" ", flush=True)
     whisper_model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
     print("OK")
 
-    print("[3/4] Starting TTS engine...", end=" ", flush=True)
+    print("[3/5] Selecting Piper voice...")
+    pick_voice()
+
+    print("[4/5] Starting TTS engine...", end=" ", flush=True)
     tts_thread = threading.Thread(target=tts_worker, daemon=True)
     tts_thread.start()
     print("OK")
 
-    print("[4/4] Selecting microphone...")
+    print("[5/5] Selecting microphone...")
     device_id = pick_input_device()
 
     print("  Calibrating...")
@@ -247,6 +414,12 @@ def main():
     min_speech_blocks = int(MIN_SPEECH_DURATION / BLOCK_DURATION)
     level_counter = 0
 
+    # Interrupt VAD (active only while the assistant is speaking)
+    interrupt_threshold = start_threshold * INTERRUPT_THRESHOLD_MULT
+    interrupt_min_blocks = int(MIN_INTERRUPT_SPEECH_DURATION / BLOCK_DURATION)
+    interrupt_buffer = []
+    interrupt_speech_blocks = 0
+
     try:
         with sd.InputStream(
             samplerate=SAMPLE_RATE,
@@ -262,13 +435,40 @@ def main():
                 except queue.Empty:
                     continue
 
-                # Skip mic input while assistant is speaking
+                # While assistant is speaking, listen for a barge-in
                 if is_speaking.is_set():
-                    audio_buffer = []
-                    is_speech = False
-                    silence_blocks = 0
-                    speech_blocks = 0
+                    rms = np.sqrt(np.mean(data.astype(np.float64) ** 2))
+                    if rms > interrupt_threshold:
+                        interrupt_buffer.append(data)
+                        interrupt_speech_blocks += 1
+                    else:
+                        interrupt_buffer = []
+                        interrupt_speech_blocks = 0
+                    if DEBUG_INTERRUPT:
+                        level_counter += 1
+                        if level_counter % 3 == 0:
+                            held = interrupt_speech_blocks * BLOCK_DURATION
+                            marker = ">>>" if rms > interrupt_threshold else "   "
+                            sys.stderr.write(
+                                f"\r[rms: {rms:>6.0f} int_thresh: {interrupt_threshold:.0f}"
+                                f" {marker} held: {held:.1f}s/{MIN_INTERRUPT_SPEECH_DURATION}s]\n"
+                            )
+                            sys.stderr.flush()
+                    if interrupt_speech_blocks >= interrupt_min_blocks and is_speaking.is_set():
+                        handle_interrupt()
+                        # Carry the interrupt audio into the normal capture so the
+                        # user's utterance isn't lost.
+                        audio_buffer = list(interrupt_buffer)
+                        is_speech = True
+                        silence_blocks = 0
+                        speech_blocks = interrupt_speech_blocks
+                        interrupt_buffer = []
+                        interrupt_speech_blocks = 0
                     continue
+
+                # Reset interrupt VAD state when assistant is idle
+                interrupt_buffer = []
+                interrupt_speech_blocks = 0
 
                 rms = np.sqrt(np.mean(data.astype(np.float64) ** 2))
 
@@ -325,7 +525,15 @@ def main():
                             ).strip()
 
                             if text and len(text) > 1:
-                                process_with_llm(text)
+                                sys.stdout.write("\r" + " " * 80 + "\r")
+                                print(f"\n You: {text}")
+                                print(" Assistant: ", end="", flush=True)
+                                interrupt_event.clear()
+                                is_speaking.set()
+                                llm_thread_ref["t"] = threading.Thread(
+                                    target=llm_worker, args=(text,), daemon=True
+                                )
+                                llm_thread_ref["t"].start()
                             else:
                                 sys.stdout.write("\r" + " " * 80 + "\r")
                                 sys.stdout.flush()
@@ -340,8 +548,14 @@ def main():
         print("\n\nGoodbye!")
         tts_queue.put(None)
     except Exception as e:
-        print(f"\nError: {e}")
+        print(f"\nError: {e}", flush=True)
+        traceback.print_exc()
         sys.exit(1)
+    except BaseException as e:
+        # Catches SystemExit, GeneratorExit, etc. that Exception would miss.
+        print(f"\nBaseException {type(e).__name__}: {e}", flush=True)
+        traceback.print_exc()
+        raise
 
 
 if __name__ == "__main__":

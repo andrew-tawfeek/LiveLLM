@@ -3,7 +3,7 @@
 A fully local voice assistant pipeline that runs on your machine. Speak into your microphone, get answers spoken back.
 
 ```
-Microphone -> faster-whisper (STT) -> Ollama LLM -> Windows SAPI (TTS) -> Speaker
+Microphone -> faster-whisper (STT) -> Ollama LLM -> Piper (TTS) -> Speaker
 ```
 
 ## Requirements
@@ -48,12 +48,14 @@ python main.py
 
 ## Usage
 
-On startup you'll be asked to pick your microphone, then the app calibrates for background noise. After that, just talk — the assistant will:
+On startup you'll be asked to pick a **Piper voice** and a **microphone**, then the app calibrates for background noise. After that, just talk — the assistant will:
 
 1. Listen until you stop speaking (~1.5s of silence)
 2. Transcribe your speech with Whisper
 3. Stream the response from the LLM
 4. Speak each sentence aloud as it arrives
+
+**Barge in at any time.** If you start talking while the assistant is responding (≥ `MIN_INTERRUPT_SPEECH_DURATION` seconds of sustained speech above `start_threshold × INTERRUPT_THRESHOLD_MULT`), it will cut itself off, log a system note in the conversation saying where it was interrupted, and start listening to you. This lets you correct course without waiting for it to finish.
 
 Press **Ctrl+C** to exit.
 
@@ -63,15 +65,89 @@ Edit the constants at the top of `main.py`:
 
 | Setting | Default | Description |
 |---|---|---|
-| `OLLAMA_MODEL` | `qwen2.5:7b` | Any model available via `ollama list` |
+| `OLLAMA_MODEL` | `gemma4:e2b` | Any model available via `ollama list` |
 | `WHISPER_MODEL` | `base` | Whisper size: `tiny`, `base`, `small`, `medium` |
 | `SILENCE_DURATION` | `1.5` | Seconds of silence before processing speech |
 | `MIN_SPEECH_DURATION` | `0.5` | Minimum speech length to process (filters noise) |
-| `TTS_RATE` | `2` | Speech speed: -10 (slowest) to 10 (fastest) |
+| `MIN_INTERRUPT_SPEECH_DURATION` | `1.0` | Seconds of sustained speech to barge in on the assistant |
+| `INTERRUPT_THRESHOLD_MULT` | `1.5` | Barge-in requires volume > `start_threshold × this` (guards against feedback) |
+| `DEBUG_INTERRUPT` | `False` | Print live RMS / threshold / held-duration while assistant speaks. Useful for tuning barge-in thresholds; scrambles the streaming token display when on. |
+| `PIPER_VOICE_PATH` | `models/piper/en_US-amy-medium.onnx` | Default voice if only one is installed; also the default highlighted in the launch picker (see [Changing the Voice](#changing-the-voice)) |
+| `TTS_SPEED` | `1.2` | Piper speech speed (higher = faster; maps to `1/length_scale`) |
+| `TTS_PITCH` | `1.0` | Playback pitch shift. `0.9` ≈ 2 semitones down; `1.1` ≈ 2 up. Duration auto-compensates. |
+| `TTS_NOISE_SCALE` | `0.85` | Prosody/intonation variability (voice default ~0.667). Set to `None` to use the voice's own default. Lower = flatter, higher = more expressive pitch swings |
+| `TTS_NOISE_W_SCALE` | `1.0` | Rhythm/timing variability (voice default ~0.8). Set to `None` to use the voice's own default. Lower = metronomic, higher = looser pacing |
+| `TTS_VOLUME` | `1.0` | Output gain multiplier |
+| `TTS_NORMALIZE` | `True` | Normalize loudness across sentences. Set `False` to preserve natural dynamics |
+| `TTS_SPEAKER_ID` | `None` | Multi-speaker voices only (e.g. `en_US-libritts_r` has ~900 ids) |
 | `INPUT_DEVICE` | `None` | Set to a device index to skip the mic picker |
-| `DEBUG_LEVELS` | `True` | Show live audio RMS meter while idle |
+| `DEBUG_LEVELS` | `False` | Show live audio RMS meter while idle |
 
 Run `python list_devices.py` to see all audio device indices.
+
+## Changing the Voice
+
+`run.bat` downloads a curated set of seven English Piper voices on first launch (~500 MB total). At startup the app lists every `.onnx` in `models/piper/` and lets you pick one for the session:
+
+```
+[3/5] Selecting Piper voice...
+  Installed Piper voices:
+    [0] en_GB-alan-medium.onnx
+    [1] en_GB-jenny_dioco-medium.onnx
+    [2] en_US-amy-medium.onnx (default)
+    [3] en_US-hfc_female-medium.onnx
+    [4] en_US-lessac-medium.onnx
+    [5] en_US-libritts_r-medium.onnx
+    [6] en_US-ryan-high.onnx
+  Pick a voice [0-6]:
+```
+
+The default highlighted in the picker is whatever `PIPER_VOICE_PATH` points at in `main.py`. To make a different voice the permanent default, edit that constant.
+
+### Bundled voices
+
+| Voice | Size | Character |
+|---|---|---|
+| `en_US-amy-medium` (default) | ~63 MB | Female, American, warm |
+| `en_US-ryan-high` | ~116 MB | Male, American, broadcast-style |
+| `en_US-hfc_female-medium` | ~63 MB | Female, American, neutral/clean |
+| `en_US-lessac-medium` | ~61 MB | Female, American, audiobook cadence |
+| `en_GB-jenny_dioco-medium` | ~63 MB | Female, British |
+| `en_GB-alan-medium` | ~63 MB | Male, British |
+| `en_US-libritts_r-medium` | ~75 MB | Multi-speaker (~900 speakers — select via `speaker_id`) |
+
+### Adding more voices
+
+Any `.onnx` + matching `.onnx.json` pair dropped into `models/piper/` will show up in the picker automatically. Browse the full catalog — more accents, speakers, quality tiers — at the [Piper voices repo on Hugging Face](https://huggingface.co/rhasspy/piper-voices/tree/main). Path pattern: `<lang>/<locale>/<speaker>/<quality>/<name>.onnx`. Example:
+
+```bash
+curl -L -o models/piper/en_US-joe-medium.onnx ^
+  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/joe/medium/en_US-joe-medium.onnx
+curl -L -o models/piper/en_US-joe-medium.onnx.json ^
+  https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/joe/medium/en_US-joe-medium.onnx.json
+```
+
+Restart the app and it'll appear in the picker.
+
+### Quality tiers
+
+Every voice exists in multiple sizes. Bigger = richer, slightly slower on CPU:
+
+| Tier | Size | Notes |
+|---|---|---|
+| `x_low` | ~10–15 MB | noticeable artifacts |
+| `low` | ~20–30 MB | usable, thin |
+| `medium` | ~60–75 MB | sweet spot |
+| `high` | ~110–125 MB | richest — current default |
+
+### Speed and expressiveness
+
+- **`TTS_SPEED`** in `main.py` — `1.0` is natural; `1.1`–`1.2` feels snappier, `0.9` slower.
+- For more expressiveness you can pass `noise_scale` and `noise_w_scale` into `SynthesisConfig` inside `synthesize_piper()` (higher values = more prosody variation). Defaults (~0.667 and ~0.8) are usually fine.
+
+### Multi-speaker voices
+
+Models like `en_US-libritts_r-medium` ship hundreds of speakers in one file. Pick one by setting `speaker_id` (an int) on the `SynthesisConfig` in `synthesize_piper()`. See the voice's `.onnx.json` for the speaker list.
 
 ## Troubleshooting
 
@@ -86,7 +162,7 @@ Run `python list_devices.py` to see all audio device indices.
 
 **TTS not speaking**
 - Check Windows volume and output device
-- TTS uses Windows SAPI — make sure a voice is installed in Settings > Time & Language > Speech
+- TTS uses Piper — confirm `models/piper/en_US-amy-medium.onnx` and its `.json` exist (run.bat downloads them on first run)
 
 **Ollama errors**
 - Make sure Ollama is running: `ollama serve`
@@ -97,5 +173,5 @@ Run `python list_devices.py` to see all audio device indices.
 - **STT**: [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — CTranslate2 port of OpenAI Whisper, runs on CPU
 - **VAD**: Volume-based with auto-calibration and hysteresis (two thresholds to prevent flickering)
 - **LLM**: [Ollama](https://ollama.com/) — streams tokens for low latency
-- **TTS**: Windows SAPI via `win32com.client` with COM initialized on a dedicated thread
+- **TTS**: [Piper](https://github.com/rhasspy/piper) neural TTS via the `piper-tts` Python package (ONNX, CPU, real-time)
 - **Sentence chunking**: LLM output is buffered and split at sentence boundaries, so TTS starts speaking before the full response is ready
