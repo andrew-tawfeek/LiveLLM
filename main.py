@@ -25,14 +25,14 @@ from piper.config import SynthesisConfig
 
 
 # --- Configuration ---
-OLLAMA_MODEL = "qwen2.5:7b"
+OLLAMA_MODEL = "gemma4:e2b"
 SAMPLE_RATE = 16000
 BLOCK_DURATION = 0.1  # seconds per audio block
 BLOCK_SIZE = int(SAMPLE_RATE * BLOCK_DURATION)
 WHISPER_MODEL = "base"  # Options: tiny, base, small, medium
 SILENCE_DURATION = 1.5  # seconds of silence = end of utterance
 MIN_SPEECH_DURATION = 0.5  # minimum speech length to process
-DEBUG_LEVELS = True  # show live audio RMS levels when idle
+DEBUG_LEVELS = False  # show live audio RMS levels when idle
 # --- Interrupt (barge-in) Config ---
 MIN_INTERRUPT_SPEECH_DURATION = 1.0  # sustained speech to cut off the assistant (seconds)
 INTERRUPT_THRESHOLD_MULT = 1.5       # interrupt requires rms > start_threshold * this factor

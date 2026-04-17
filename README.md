@@ -65,7 +65,7 @@ Edit the constants at the top of `main.py`:
 
 | Setting | Default | Description |
 |---|---|---|
-| `OLLAMA_MODEL` | `qwen2.5:7b` | Any model available via `ollama list` |
+| `OLLAMA_MODEL` | `gemma4:e2b` | Any model available via `ollama list` |
 | `WHISPER_MODEL` | `base` | Whisper size: `tiny`, `base`, `small`, `medium` |
 | `SILENCE_DURATION` | `1.5` | Seconds of silence before processing speech |
 | `MIN_SPEECH_DURATION` | `0.5` | Minimum speech length to process (filters noise) |
@@ -81,7 +81,7 @@ Edit the constants at the top of `main.py`:
 | `TTS_NORMALIZE` | `True` | Normalize loudness across sentences. Set `False` to preserve natural dynamics |
 | `TTS_SPEAKER_ID` | `None` | Multi-speaker voices only (e.g. `en_US-libritts_r` has ~900 ids) |
 | `INPUT_DEVICE` | `None` | Set to a device index to skip the mic picker |
-| `DEBUG_LEVELS` | `True` | Show live audio RMS meter while idle |
+| `DEBUG_LEVELS` | `False` | Show live audio RMS meter while idle |
 
 Run `python list_devices.py` to see all audio device indices.
 
