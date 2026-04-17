@@ -69,6 +69,7 @@ Edit the constants at the top of `main.py`:
 | `MIN_SPEECH_DURATION` | `0.5` | Minimum speech length to process (filters noise) |
 | `PIPER_VOICE_PATH` | `models/piper/en_US-ryan-high.onnx` | Default voice if only one is installed; also the default highlighted in the launch picker (see [Changing the Voice](#changing-the-voice)) |
 | `TTS_SPEED` | `1.2` | Piper speech speed (higher = faster; maps to `1/length_scale`) |
+| `TTS_PITCH` | `1.0` | Playback pitch shift. `0.9` ≈ 2 semitones down; `1.1` ≈ 2 up. Duration auto-compensates. |
 | `TTS_NOISE_SCALE` | `0.85` | Prosody/intonation variability (voice default ~0.667). Set to `None` to use the voice's own default. Lower = flatter, higher = more expressive pitch swings |
 | `TTS_NOISE_W_SCALE` | `1.0` | Rhythm/timing variability (voice default ~0.8). Set to `None` to use the voice's own default. Lower = metronomic, higher = looser pacing |
 | `TTS_VOLUME` | `1.0` | Output gain multiplier |

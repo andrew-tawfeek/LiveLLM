@@ -32,6 +32,8 @@ DEBUG_LEVELS = True  # show live audio RMS levels
 # Any path in models/piper/ will also appear in the launch-time voice picker.
 PIPER_VOICE_PATH = "models/piper/en_US-amy-medium.onnx"
 TTS_SPEED = 1.2          # 1.0 natural; >1 faster, <1 slower (length_scale = 1/TTS_SPEED)
+TTS_PITCH = 1.0          # 1.0 natural; <1.0 lower, >1.0 higher. 0.9 ~ -2 semitones.
+                         #   Implemented via playback-rate shift; duration is auto-compensated.
 TTS_NOISE_SCALE = 0.85   # Prosody/intonation variability. None = voice default (~0.667).
                          #   lower -> flatter/monotone; higher -> more expressive pitch swings
 TTS_NOISE_W_SCALE = 1.0  # Rhythm/timing variability. None = voice default (~0.8).
@@ -54,8 +56,10 @@ conversation_history = []
 
 def synthesize_piper(voice, text):
     """Run Piper on one sentence. Returns (int16_samples, sample_rate)."""
+    # length_scale compensates for the TTS_PITCH-induced duration stretch so overall
+    # speed stays at TTS_SPEED regardless of pitch shift.
     syn_config = SynthesisConfig(
-        length_scale=1.0 / TTS_SPEED,
+        length_scale=TTS_PITCH / TTS_SPEED,
         noise_scale=TTS_NOISE_SCALE,
         noise_w_scale=TTS_NOISE_W_SCALE,
         volume=TTS_VOLUME,
@@ -64,11 +68,12 @@ def synthesize_piper(voice, text):
     )
     chunks = [c.audio_int16_array for c in voice.synthesize(text, syn_config=syn_config)]
     samples = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.int16)
-    sample_rate = voice.config.sample_rate
+    # Playback rate below native lowers pitch (and slows; compensated via length_scale above).
+    playback_rate = int(voice.config.sample_rate * TTS_PITCH)
     # Pad ~200ms trailing silence so sounddevice doesn't clip the sentence tail.
     if samples.size:
-        samples = np.concatenate([samples, np.zeros(int(sample_rate * 0.2), dtype=np.int16)])
-    return samples, sample_rate
+        samples = np.concatenate([samples, np.zeros(int(playback_rate * 0.2), dtype=np.int16)])
+    return samples, playback_rate
 
 
 def tts_worker():
