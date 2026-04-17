@@ -2,4 +2,4 @@ sounddevice
 numpy
 ollama
 faster-whisper
-pywin32
+piper-tts

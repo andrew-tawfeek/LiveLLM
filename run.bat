@@ -46,6 +46,27 @@ if not exist "venv\Scripts\activate.bat" (
     call venv\Scripts\activate.bat
 )
 
+:: Download Piper voice model on first run
+if not exist "models\piper\en_US-lessac-medium.onnx" (
+    echo [Setup] Downloading Piper voice model...
+    if not exist "models\piper" mkdir "models\piper"
+    curl -L -o "models\piper\en_US-lessac-medium.onnx" "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx"
+    if errorlevel 1 (
+        echo ERROR: Failed to download Piper voice model.
+        pause
+        exit /b 1
+    )
+)
+if not exist "models\piper\en_US-lessac-medium.onnx.json" (
+    echo [Setup] Downloading Piper voice config...
+    curl -L -o "models\piper\en_US-lessac-medium.onnx.json" "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json"
+    if errorlevel 1 (
+        echo ERROR: Failed to download Piper voice config.
+        pause
+        exit /b 1
+    )
+)
+
 :: Start Ollama if not running
 "%OLLAMA_CMD%" list >nul 2>&1
 if errorlevel 1 (

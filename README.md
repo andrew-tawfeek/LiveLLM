@@ -3,7 +3,7 @@
 A fully local voice assistant pipeline that runs on your machine. Speak into your microphone, get answers spoken back.
 
 ```
-Microphone -> faster-whisper (STT) -> Ollama LLM -> Windows SAPI (TTS) -> Speaker
+Microphone -> faster-whisper (STT) -> Ollama LLM -> Piper (TTS) -> Speaker
 ```
 
 ## Requirements
@@ -67,7 +67,8 @@ Edit the constants at the top of `main.py`:
 | `WHISPER_MODEL` | `base` | Whisper size: `tiny`, `base`, `small`, `medium` |
 | `SILENCE_DURATION` | `1.5` | Seconds of silence before processing speech |
 | `MIN_SPEECH_DURATION` | `0.5` | Minimum speech length to process (filters noise) |
-| `TTS_RATE` | `2` | Speech speed: -10 (slowest) to 10 (fastest) |
+| `TTS_SPEED` | `1.0` | Piper speech speed (higher = faster) |
+| `PIPER_VOICE_PATH` | `models/piper/en_US-lessac-medium.onnx` | Piper ONNX voice model |
 | `INPUT_DEVICE` | `None` | Set to a device index to skip the mic picker |
 | `DEBUG_LEVELS` | `True` | Show live audio RMS meter while idle |
 
@@ -86,7 +87,7 @@ Run `python list_devices.py` to see all audio device indices.
 
 **TTS not speaking**
 - Check Windows volume and output device
-- TTS uses Windows SAPI — make sure a voice is installed in Settings > Time & Language > Speech
+- TTS uses Piper — confirm `models/piper/en_US-lessac-medium.onnx` and its `.json` exist (run.bat downloads them on first run)
 
 **Ollama errors**
 - Make sure Ollama is running: `ollama serve`
@@ -97,5 +98,5 @@ Run `python list_devices.py` to see all audio device indices.
 - **STT**: [faster-whisper](https://github.com/SYSTRAN/faster-whisper) — CTranslate2 port of OpenAI Whisper, runs on CPU
 - **VAD**: Volume-based with auto-calibration and hysteresis (two thresholds to prevent flickering)
 - **LLM**: [Ollama](https://ollama.com/) — streams tokens for low latency
-- **TTS**: Windows SAPI via `win32com.client` with COM initialized on a dedicated thread
+- **TTS**: [Piper](https://github.com/rhasspy/piper) neural TTS via the `piper-tts` Python package (ONNX, CPU, real-time)
 - **Sentence chunking**: LLM output is buffered and split at sentence boundaries, so TTS starts speaking before the full response is ready

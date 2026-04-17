@@ -1,6 +1,6 @@
 """
 LiveLLM - Local Voice Assistant Pipeline
-Microphone -> faster-whisper STT -> Ollama LLM -> Windows SAPI TTS -> Speaker
+Microphone -> faster-whisper STT -> Ollama LLM -> Piper TTS -> Speaker
 
 Usage: python main.py
 Requirements: Ollama running with qwen2.5:7b pulled
@@ -15,6 +15,8 @@ import sys
 
 import ollama
 from faster_whisper import WhisperModel
+from piper import PiperVoice
+from piper.config import SynthesisConfig
 
 
 # --- Configuration ---
@@ -26,7 +28,8 @@ WHISPER_MODEL = "base"  # Options: tiny, base, small, medium
 SILENCE_DURATION = 1.5  # seconds of silence = end of utterance
 MIN_SPEECH_DURATION = 0.5  # minimum speech length to process
 DEBUG_LEVELS = True  # show live audio RMS levels
-TTS_RATE = 2  # SAPI rate: -10 (slowest) to 10 (fastest)
+PIPER_VOICE_PATH = "models/piper/en_US-lessac-medium.onnx"
+TTS_SPEED = 1.0  # 1.0 = natural pace; higher = faster
 INPUT_DEVICE = None  # Set to a device index to override (see list_devices.py)
 SYSTEM_PROMPT = (
     "You are a helpful voice assistant. Keep responses concise and "
@@ -40,26 +43,21 @@ is_speaking = threading.Event()
 conversation_history = []
 
 
+def synthesize_piper(voice, text):
+    """Run Piper on one sentence. Returns (int16_samples, sample_rate)."""
+    syn_config = SynthesisConfig(length_scale=1.0 / TTS_SPEED)
+    chunks = [c.audio_int16_array for c in voice.synthesize(text, syn_config=syn_config)]
+    samples = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.int16)
+    return samples, voice.config.sample_rate
+
+
 def tts_worker():
-    """Speak sentences using Windows SAPI directly via COM.
-
-    Uses win32com.client with explicit COM initialization on this thread,
-    which avoids the threading bugs that plague pyttsx3.
-    """
-    import pythoncom
-    import win32com.client
-
-    pythoncom.CoInitialize()
+    # Using Piper via the piper-tts pip package (Try A: pip install succeeded).
     try:
-        speaker = win32com.client.Dispatch("SAPI.SpVoice")
-        speaker.Rate = TTS_RATE
-        # Speak a space to confirm TTS works
-        speaker.Speak(" ")
+        voice = PiperVoice.load(PIPER_VOICE_PATH)
         print("[TTS ready]", file=sys.stderr)
     except Exception as e:
         print(f"[TTS init failed: {e}]", file=sys.stderr)
-        pythoncom.CoUninitialize()
-        # Drain the queue so the program doesn't hang
         while True:
             if tts_queue.get() is None:
                 break
@@ -71,14 +69,15 @@ def tts_worker():
             break
         is_speaking.set()
         try:
-            speaker.Speak(text)
+            samples, sample_rate = synthesize_piper(voice, text)
+            if samples.size:
+                sd.play(samples, sample_rate)
+                sd.wait()
         except Exception as e:
             print(f"[TTS error: {e}]", file=sys.stderr)
         time.sleep(0.05)
         if tts_queue.empty():
             is_speaking.clear()
-
-    pythoncom.CoUninitialize()
 
 
 def flush_sentences(buffer):
